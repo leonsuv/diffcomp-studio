@@ -1,0 +1,45 @@
+# =============================================================================
+# dc_gpu - GPU Compute Diff Engine
+# =============================================================================
+# wgpu-based GPU compute pipeline for real-time image comparison.
+#
+# ## Architecture
+# 1. Upload images A and B as wgpu textures
+# 2. Dispatch compute shader that runs per-pixel diff
+# 3. Read back the diff result texture
+# 4. Integrate with egui's texture system for display
+#
+# ## Platform Support
+# - macOS: Metal backend
+# - Windows: DX12 / Vulkan
+# - Linux: Vulkan
+# - Web (WASM): WebGPU
+# =============================================================================
+
+[package]
+name = "dc_gpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# GPU compute
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+
+# Image data types
+image.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Platform abstraction
+cfg-if.workspace = true
+
+# Async support
+futures = "0.3"

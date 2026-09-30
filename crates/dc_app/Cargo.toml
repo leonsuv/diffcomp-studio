@@ -1,0 +1,76 @@
+# =============================================================================
+# dc_app - DiffComp Studio GUI Application (v2: Pure Rust)
+# =============================================================================
+# The egui-based desktop application.
+# Integrates dc_core (alignment, loading) and dc_gpu (GPU diffing).
+# =============================================================================
+
+[package]
+name = "dc_app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "diffcomp-studio"
+path = "src/main.rs"
+
+[lib]
+name = "dc_app"
+path = "src/lib.rs"
+
+[dependencies]
+# Internal crates
+dc_core = { path = "../dc_core" }
+dc_gpu = { path = "../dc_gpu" }
+dc_license = { path = "../dc_license" }
+
+# GUI framework (egui + eframe with wgpu backend)
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+
+# Image handling
+image.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# File dialogs
+rfd.workspace = true
+
+# Serialization (for preferences)
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+rayon.workspace = true
+
+# Error handling
+anyhow.workspace = true
+pollster.workspace = true
+egui_dock = "0.15"
+uuid = { version = "1.10.0", features = ["v4", "fast-rng", "js"] }
+csv = "1.4.0"
+rust_xlsxwriter = "0.94.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "HtmlInputElement",
+    "FileList",
+    "File",
+    "FileReader",
+    "Event",
+    "EventTarget",
+    "Document",
+    "HtmlBodyElement",
+    "Element",
+    "Window",
+    "Blob",
+] }
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "0.2"
+js-sys = "0.3"

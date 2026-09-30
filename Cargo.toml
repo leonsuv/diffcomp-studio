@@ -1,0 +1,99 @@
+# =============================================================================
+# DiffComp Studio - Workspace Root Configuration (v2: Pure Rust)
+# =============================================================================
+# A high-performance, engineering-grade document comparison tool built in Rust.
+# Architecture: Modular workspace with strict separation of concerns.
+#
+# v2 MIGRATION:
+#   ✅ REMOVED: opencv (C++ bindings, system dependency)
+#   ✅ REMOVED: pdfium-render (native library dependency)
+#   ✅ ADDED:   wgpu (GPU compute for real-time diffing)
+#   ✅ ADDED:   Pure-Rust alignment (ORB + RANSAC, no OpenCV)
+#   ✅ TARGET:  Desktop (macOS/Windows/Linux) + Web (WASM)
+# =============================================================================
+
+[workspace]
+# Rust 2021 Edition for all workspace members
+resolver = "2"
+
+members = [
+    "crates/dc_core",      # Core: Image processing, alignment, file traits
+    "crates/dc_gpu",       # GPU: wgpu compute shaders for diffing
+    "crates/dc_license",   # Security: Offline license validation
+    "crates/dc_app",       # UI: egui-based application
+    "crates/dc_keygen",    # Internal: License key generation CLI
+]
+
+# Shared dependencies across the workspace to ensure version consistency
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Image Processing (Pure Rust - NO system deps)
+image = { version = "0.25", features = ["png", "jpeg", "tiff", "bmp"] }
+
+# GPU Compute (wgpu - maps to WebGPU/Metal/Vulkan/DX12)
+wgpu = "23.0"
+pollster = "0.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+
+# Cryptography for licensing
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+
+# GUI Framework (egui + eframe with wgpu backend)
+eframe = { version = "0.30", features = ["wgpu"] }
+egui = "0.30"
+egui_extras = { version = "0.30", features = ["image"] }
+
+# Concurrency
+rayon = "1.10"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hardware ID generation (desktop only)
+machine-uid = "0.5"
+
+# CLI argument parsing (for keygen)
+clap = { version = "4.5", features = ["derive"] }
+
+# Platform abstraction
+cfg-if = "1.0"
+
+# File dialogs (desktop only)
+rfd = "0.15"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["DiffComp Studio Team"]
+license = "Proprietary"
+rust-version = "1.85"
+
+# Optimize release builds for performance
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Development profile with some optimizations for faster iteration
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

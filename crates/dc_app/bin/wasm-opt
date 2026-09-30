@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Optional portable optimizer wrapper. The default Trunk build does not require it.
+set -eu
+if [ -z "${DIFFCOMP_WASM_OPT:-}" ]; then
+    echo 'Set DIFFCOMP_WASM_OPT to the absolute path of a Binaryen wasm-opt executable.' >&2
+    exit 1
+fi
+exec "$DIFFCOMP_WASM_OPT" --enable-bulk-memory --enable-nontrapping-float-to-int --enable-mutable-globals --enable-sign-ext "$@"

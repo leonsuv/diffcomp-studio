@@ -1,0 +1,48 @@
+# =============================================================================
+# dc_core - The Brain of DiffComp Studio (v2: Pure Rust)
+# =============================================================================
+# This crate contains all the core image processing logic:
+# - Document loading traits (extensible for images; PDF via pure-Rust in future)
+# - Feature-based alignment using pure-Rust ORB + RANSAC + Homography
+# - Pixel difference computation and heatmap generation
+#
+# v2: ALL OpenCV and pdfium dependencies REMOVED.
+# =============================================================================
+
+[package]
+name = "dc_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+
+# Image processing (pure Rust, no system deps)
+image.workspace = true
+
+# PDF loading (pure Rust)
+hayro = "0.5"               # Pure Rust PDF rasterizer
+hayro-syntax = "0.5"        # PDF parsing for hayro
+hayro-interpret = "0.5"     # PDF interpreter settings
+
+# Concurrency for parallel image processing
+rayon.workspace = true
+
+# Error handling - zero unwrap() policy
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Platform abstraction
+cfg-if.workspace = true
+uuid = { version = "1.10.0", features = ["v4", "fast-rng"] }
+
+[dev-dependencies]
+# Testing utilities
+tempfile = "3.14"

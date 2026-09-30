@@ -1,0 +1,43 @@
+# =============================================================================
+# dc_keygen - License Key Generator (INTERNAL USE ONLY)
+# =============================================================================
+# Command-line tool for generating license keys.
+#
+# WARNING: This tool contains the PRIVATE KEY and must NEVER be distributed!
+# Keep this binary and its source code in a secure, access-controlled location.
+# =============================================================================
+
+[package]
+name = "dc_keygen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false  # NEVER publish this to crates.io!
+
+[[bin]]
+name = "dc-keygen"
+path = "src/main.rs"
+
+[dependencies]
+# Cryptography
+ed25519-dalek.workspace = true
+rand.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Internal crate for payload structure
+dc_license = { path = "../dc_license" }

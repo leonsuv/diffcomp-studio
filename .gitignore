@@ -1,0 +1,9 @@
+/target/
+/dist/
+/crates/dc_app/dist/
+.DS_Store
+*.key
+check*.json
+clippy*.json
+/sample-diffs/
+/AUDIT.md
