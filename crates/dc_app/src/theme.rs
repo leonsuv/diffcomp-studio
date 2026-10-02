@@ -8,6 +8,10 @@ pub const TEXT: Color32 = Color32::from_rgb(226, 226, 229);
 pub const MUTED: Color32 = Color32::from_rgb(153, 153, 160);
 pub const ACCENT: Color32 = Color32::from_rgb(88, 157, 246);
 pub fn configure(ctx: &Context) {
+    // Custom workspace colors require a fixed dark style, regardless of OS events
+    // or the theme preference restored from a previous session.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
     let mut style = (*ctx.style()).clone();
     let mut visuals = Visuals::dark();
     visuals.panel_fill = PANEL;
@@ -63,6 +67,35 @@ pub fn configure(ctx: &Context) {
     style.spacing.window_margin = Margin::same(14.0);
     ctx.set_style(style);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_stays_dark_across_system_theme_changes() {
+        let ctx = Context::default();
+        // A previously persisted preference must not override the workspace.
+        ctx.set_theme(egui::ThemePreference::Light);
+        configure(&ctx);
+        let expected_style = ctx.style();
+
+        for system_theme in [egui::Theme::Light, egui::Theme::Dark, egui::Theme::Light] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    system_theme: Some(system_theme),
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert_eq!(ctx.theme(), egui::Theme::Dark);
+                    assert!(ctx.style().visuals.dark_mode);
+                    assert_eq!(ctx.style(), expected_style);
+                },
+            );
+        }
+    }
+}
+
 pub fn dock_style(ctx: &Context) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
     style.main_surface_border_stroke = Stroke::NONE;
