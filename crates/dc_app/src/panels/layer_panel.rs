@@ -62,6 +62,7 @@ pub fn layer_panel(ui: &mut Ui, state: &mut AppState, textures: &mut TextureCach
 
                 let mut layer_to_move: Option<(LayerId, bool)> = None;
                 let mut layer_to_toggle_visibility: Option<LayerId> = None;
+                let mut page_request: Option<(LayerId, i32)> = None;
 
                 for layer in &state.session.layers {
                     let is_selected = state.session.selected_layer == Some(layer.id);
@@ -150,16 +151,50 @@ pub fn layer_panel(ui: &mut Ui, state: &mut AppState, textures: &mut TextureCach
                                         } else {
                                             "workspace.revision"
                                         });
+                                        let pages = layer.page_count();
+                                        if pages > 1 {
+                                            // Turn this document alone, e.g. page 1 against page 2.
+                                            let shown = layer.page_for(state.session.current_page);
+                                            let can_back = shown.map_or(true, |p| p > 0);
+                                            let can_forward = shown.map_or(true, |p| p + 1 < pages);
+                                            if ui
+                                                .add_enabled(
+                                                    can_back,
+                                                    egui::Button::new("‹").small(),
+                                                )
+                                                .on_hover_text(crate::i18n::tr(
+                                                    "workspace.prev_doc_page",
+                                                ))
+                                                .clicked()
+                                            {
+                                                page_request = Some((layer_id, -1));
+                                                button_clicked = true;
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    can_forward,
+                                                    egui::Button::new("›").small(),
+                                                )
+                                                .on_hover_text(crate::i18n::tr(
+                                                    "workspace.next_doc_page",
+                                                ))
+                                                .clicked()
+                                            {
+                                                page_request = Some((layer_id, 1));
+                                                button_clicked = true;
+                                            }
+                                        }
                                         let detail = if layer.is_page_missing() {
                                             format!(
                                                 "{role} · {}",
                                                 crate::i18n::tr("workspace.page_missing")
                                             )
-                                        } else if layer.page_count() > 1 {
+                                        } else if pages > 1 {
                                             format!(
-                                                "{role} · {} {}",
-                                                layer.page_count(),
-                                                crate::i18n::tr("workspace.pages")
+                                                "{role} · {} {}/{}",
+                                                crate::i18n::tr("workspace.page_short"),
+                                                layer.active_page + 1,
+                                                pages
                                             )
                                         } else {
                                             role.to_string()
@@ -293,6 +328,9 @@ pub fn layer_panel(ui: &mut Ui, state: &mut AppState, textures: &mut TextureCach
                     state.session.selected_annotation = None;
                     state.tools.active_tool = None;
                     state.ui.tool_mode = crate::state::ToolMode::Select;
+                }
+                if page_request.is_some() {
+                    state.ui.request_document_page = page_request;
                 }
                 if let Some(id) = layer_to_set_reference {
                     let old_reference_id = state

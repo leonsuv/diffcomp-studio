@@ -111,6 +111,13 @@ pub enum UndoCommand {
     /// changes (markups, offsets) always happens on their own page.
     SetPage { old_page: usize, new_page: usize },
 
+    /// One document was turned to another page than the others.
+    SetPageShift {
+        layer_id: LayerId,
+        old_shift: i32,
+        new_shift: i32,
+    },
+
     // =========================================================================
     // Annotation Operations
     // =========================================================================
@@ -192,6 +199,7 @@ impl UndoCommand {
             Self::SetLayerOffset { .. } => "Change Layer Offset".to_string(),
             Self::SetReference { .. } => "Set Reference Layer".to_string(),
             Self::SetPage { new_page, .. } => format!("Show Page {}", new_page + 1),
+            Self::SetPageShift { .. } => "Turn Document Page".to_string(),
             Self::AddAnnotation { .. } => "Add Annotation".to_string(),
             Self::RemoveAnnotation { .. } => "Delete Annotation".to_string(),
             Self::ModifyAnnotation { .. } => "Modify Annotation".to_string(),
@@ -393,6 +401,9 @@ pub struct LayerSaveData {
     /// Page shown when the snapshot was taken.
     #[serde(default)]
     pub active_page: usize,
+    /// Pages ahead of the session page.
+    #[serde(default)]
+    pub page_shift: i32,
 }
 
 /// Page-specific layer state without pixel data.
@@ -470,6 +481,7 @@ impl From<&Layer> for LayerSaveData {
             aligned_size: page.aligned.as_ref().map(|b| b.dimensions()),
             pages: save_pages(layer),
             active_page: layer.active_page,
+            page_shift: layer.page_shift,
         }
     }
 }
@@ -570,6 +582,15 @@ pub enum UndoCommandSave {
         old_page: usize,
         /// New page.
         new_page: usize,
+    },
+    /// Page of one document changed.
+    SetPageShift {
+        /// Layer ID.
+        layer_id: LayerId,
+        /// Old shift.
+        old_shift: i32,
+        /// New shift.
+        new_shift: i32,
     },
     /// Annotation added.
     AddAnnotation {
@@ -722,6 +743,15 @@ impl UndoCommand {
             Self::SetPage { old_page, new_page } => UndoCommandSave::SetPage {
                 old_page: *old_page,
                 new_page: *new_page,
+            },
+            Self::SetPageShift {
+                layer_id,
+                old_shift,
+                new_shift,
+            } => UndoCommandSave::SetPageShift {
+                layer_id: *layer_id,
+                old_shift: *old_shift,
+                new_shift: *new_shift,
             },
             Self::AddAnnotation {
                 layer_id,
@@ -882,6 +912,15 @@ impl UndoCommandSave {
             Self::SetPage { old_page, new_page } => {
                 Some(UndoCommand::SetPage { old_page, new_page })
             }
+            Self::SetPageShift {
+                layer_id,
+                old_shift,
+                new_shift,
+            } => Some(UndoCommand::SetPageShift {
+                layer_id,
+                old_shift,
+                new_shift,
+            }),
             Self::AddAnnotation {
                 layer_id,
                 annotation,
@@ -1180,6 +1219,7 @@ impl UndoCommand {
                         layer.is_reference = true;
                     }
                 }
+                session.assign_revision_colors();
                 session.diff_result = None;
                 session.is_dirty = true;
                 Self::SetReference {
@@ -1193,6 +1233,19 @@ impl UndoCommand {
                 Self::SetPage {
                     old_page: *new_page,
                     new_page: *old_page,
+                }
+            }
+
+            Self::SetPageShift {
+                layer_id,
+                old_shift,
+                new_shift,
+            } => {
+                session.set_page_shift(*layer_id, *old_shift);
+                Self::SetPageShift {
+                    layer_id: *layer_id,
+                    old_shift: *new_shift,
+                    new_shift: *old_shift,
                 }
             }
 

@@ -250,6 +250,10 @@ pub struct Layer {
     /// Page shown in the page-specific fields. May exceed the page count when
     /// the session shows a page this document does not have (blank).
     pub active_page: usize,
+
+    /// Pages this document is ahead of (or behind) the session page, so that
+    /// e.g. page 1 of the reference can be compared with page 2 of a revision.
+    pub page_shift: i32,
 }
 
 /// Page-specific state of a document layer.
@@ -317,6 +321,7 @@ impl Layer {
             offset_y: 0.0,
             pages: Vec::new(),
             active_page: 0,
+            page_shift: 0,
         }
     }
 
@@ -348,6 +353,18 @@ impl Layer {
     /// Whether the document has the given page (0-indexed).
     pub fn has_page(&self, page: usize) -> bool {
         page < self.page_count()
+    }
+
+    /// Page of this document shown for a session page; `None` if it has no such page.
+    pub fn page_for(&self, session_page: usize) -> Option<usize> {
+        let page = session_page as i64 + self.page_shift as i64;
+        (page >= 0 && self.has_page(page as usize)).then_some(page as usize)
+    }
+
+    /// Show the page that belongs to a session page (blank if there is none).
+    pub fn show_session_page(&mut self, session_page: usize) {
+        let page = self.page_for(session_page).unwrap_or(self.page_count());
+        self.show_page(page);
     }
 
     /// Whether the shown page is a blank stand-in for a missing page.

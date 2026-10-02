@@ -24,8 +24,9 @@ use tracing::{error, info};
 #[derive(Serialize, Deserialize)]
 struct SessionSaveData {
     layers: Vec<LayerSaveData>,
+    /// Missing in sessions written by other programs.
     #[serde(default)]
-    diff_config: dc_core::DiffConfig,
+    diff_config: Option<dc_core::DiffConfig>,
     #[serde(default)]
     calibration: dc_core::Calibration,
     #[serde(default = "default_count")]
@@ -94,6 +95,8 @@ struct LayerSaveData {
     pages: Vec<PageData>,
     #[serde(default)]
     active_page: usize,
+    #[serde(default)]
+    page_shift: i32,
 }
 
 /// Saved state of one document page.
@@ -193,7 +196,7 @@ pub fn save_session(session: &SessionState, path: &Path) -> CoreResult<()> {
                 Ok(data)
             })
             .collect::<CoreResult<Vec<_>>>()?,
-        diff_config: session.diff_config.clone(),
+        diff_config: Some(session.diff_config.clone()),
         calibration: session.calibration.clone(),
         count_counter: session.count_counter,
         viewport: session.viewport,
@@ -262,7 +265,8 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
     let mut session = SessionState::new();
     session.viewport = save_data.viewport;
     session.next_layer_id = save_data.next_layer_id;
-    session.diff_config = save_data.diff_config;
+    let has_diff_config = save_data.diff_config.is_some();
+    session.diff_config = save_data.diff_config.unwrap_or_default();
     session.calibration = save_data.calibration;
     session.count_counter = save_data.count_counter;
 
@@ -277,13 +281,6 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
                 .join(&layer_data.source_path)
         };
         let pages = if layer_data.pages.is_empty() {
-            let image = if let Some(encoded) = &layer_data.embedded_png {
-                let mut buffer = decode_png(encoded, layer_data.dpi)?;
-                buffer.page_index = layer_data.page_index;
-                buffer
-            } else {
-                load_image(&source_path, layer_data.dpi, layer_data.page_index)?
-            };
             let data = UndoPageSaveData {
                 homography_matrix: layer_data.homography_matrix,
                 annotations: layer_data.annotations.clone(),
@@ -291,11 +288,25 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
                 offset_y: layer_data.offset_y,
                 aligned_size: layer_data.aligned_size,
             };
-            vec![restore_page(
-                image,
-                &data,
-                layer_data.aligned_png.as_deref(),
-            )?]
+            let aligned_png = layer_data.aligned_png.as_deref();
+            if let Some(encoded) = &layer_data.embedded_png {
+                let mut buffer = decode_png(encoded, layer_data.dpi)?;
+                buffer.page_index = layer_data.page_index;
+                vec![restore_page(buffer, &data, aligned_png)?]
+            } else if layer_data.page_index.is_some() {
+                let image = load_image(&source_path, layer_data.dpi, layer_data.page_index)?;
+                vec![restore_page(image, &data, aligned_png)?]
+            } else {
+                // No page given (single images, older or generated sessions):
+                // open every page of the file; the saved state belongs to page 1.
+                let mut all = load_all_pages(&source_path, layer_data.dpi)?.into_iter();
+                let first = all.next().ok_or_else(|| CoreError::ImageDecodeError {
+                    reason: format!("{} has no pages", source_path.display()),
+                })?;
+                std::iter::once(restore_page(first, &data, aligned_png))
+                    .chain(all.map(|page| Ok(LayerPage::new(page))))
+                    .collect::<CoreResult<Vec<_>>>()?
+            }
         } else {
             let mut from_disk: Vec<Option<RasterBuffer>> =
                 if layer_data.pages.iter().any(|p| p.embedded_png.is_none()) {
@@ -347,6 +358,7 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
             0
         };
         layer.set_pages(pages, active_page);
+        layer.page_shift = layer_data.page_shift;
         layer.visible = layer_data.visible;
         layer.opacity = layer_data.opacity;
         layer.blend_color = layer_data.blend_color;
@@ -372,6 +384,13 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
     session.session_path = Some(path.to_path_buf());
     session.current_page = save_data.current_page;
     session.sync_pages();
+    if !has_diff_config {
+        // Generated sessions only give each document a color; the reference
+        // document's color is the reference color.
+        if let Some(color) = session.reference_layer().map(|l| l.blend_color) {
+            session.diff_config.reference_color = color;
+        }
+    }
 
     // Restore undo stack if present
     if let Some(undo_save) = save_data.undo_stack {
@@ -402,6 +421,7 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
                         .collect::<CoreResult<Vec<_>>>()?;
                     layer.set_pages(pages, data.active_page);
                 }
+                layer.page_shift = data.page_shift;
                 layer.visible = data.visible;
                 layer.opacity = data.opacity;
                 layer.blend_color = data.blend_color;
@@ -449,6 +469,7 @@ impl From<&Layer> for LayerSaveData {
             aligned_png: None,
             pages: Vec::new(),
             active_page: layer.active_page,
+            page_shift: layer.page_shift,
         }
     }
 }
@@ -569,6 +590,41 @@ mod tests {
         let layer = loaded.get_layer(id).unwrap();
         assert_eq!(layer.original.dimensions(), (2, 2));
         assert_eq!(layer.offset_x, 4.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn generated_session_keeps_colors_and_opens_all_pages() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        let dir = temp_dir();
+        let mut paths = Vec::new();
+        for name in ["old.tif", "new.tif"] {
+            let path = dir.join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = TiffEncoder::new(file).unwrap();
+            for _ in 0..2 {
+                encoder
+                    .write_image::<colortype::Gray8>(2, 2, &[0, 255, 255, 255])
+                    .unwrap();
+            }
+            paths.push(path.display().to_string().replace('\\', "\\\\"));
+        }
+        // A session generated by another program: colors only, no pages.
+        let json = format!(
+            r#"{{"layers":[{{"id":1,"name":"Old","source_path":"{}","homography_matrix":null,"visible":true,"opacity":1.0,"blend_color":{{"r":0,"g":0,"b":255}},"is_reference":true,"annotations":[]}},{{"id":2,"name":"New","source_path":"{}","homography_matrix":null,"visible":true,"opacity":1.0,"blend_color":{{"r":255,"g":0,"b":0}},"is_reference":false,"annotations":[]}}],"viewport":{{"center_x":0.0,"center_y":0.0,"zoom":1.0,"rotation":0.0}},"next_layer_id":3,"selected_layer":null}}"#,
+            paths[0], paths[1]
+        );
+        let path = dir.join("generated.dcs");
+        std::fs::write(&path, json).unwrap();
+        let session = load_session(&path).unwrap();
+        assert_eq!(
+            session.diff_config.reference_color,
+            LayerColor::new(0, 0, 255)
+        );
+        let revision = session.get_layer(LayerId(2)).unwrap();
+        assert_eq!(revision.blend_color, LayerColor::new(255, 0, 0));
+        assert_eq!(revision.page_count(), 2);
+        assert_eq!(session.page_count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

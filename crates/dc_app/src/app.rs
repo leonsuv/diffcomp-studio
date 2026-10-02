@@ -2043,6 +2043,25 @@ impl DiffCompApp {
         ));
     }
 
+    /// Turn the page of a single document, e.g. to compare page 1 with page 2.
+    fn turn_document_page(&mut self, id: dc_core::LayerId, delta: i32) {
+        let Some(old_shift) = self.state.session.shift_document_page(id, delta) else {
+            return;
+        };
+        self.state
+            .session
+            .undo_stack
+            .push(UndoCommand::SetPageShift {
+                layer_id: id,
+                old_shift,
+                new_shift: old_shift + delta,
+            });
+        self.textures.clear();
+        self.state.ui.diff_invalidated = true;
+        self.state.ui.diff_failed = false;
+        self.align_targets(true);
+    }
+
     /// Align the revisions shown on the current page.
     fn align_targets(&mut self, only_unaligned: bool) {
         let ids: Vec<_> = self
@@ -2461,15 +2480,18 @@ impl DiffCompApp {
                         {
                             go_to_page = Some(page - 1);
                         }
-                        ui.label(
-                            egui::RichText::new(format!(
+                        let label = if self.state.session.pages_linked() {
+                            format!(
                                 "{} {} / {}",
                                 crate::i18n::tr("workspace.page"),
                                 page + 1,
                                 pages
-                            ))
-                            .strong(),
-                        );
+                            )
+                        } else {
+                            crate::i18n::tr("workspace.pages_together").to_string()
+                        };
+                        ui.label(egui::RichText::new(label).strong())
+                            .on_hover_text(crate::i18n::tr("workspace.pages_together_hint"));
                         if ui
                             .add_enabled(page + 1 < pages, egui::Button::new("▶"))
                             .on_hover_text(crate::i18n::tr("workspace.next_page"))
@@ -2555,6 +2577,10 @@ impl eframe::App for DiffCompApp {
         if self.state.ui.request_file_dialog {
             self.state.ui.request_file_dialog = false;
             self.open_file_dialog(ctx);
+        }
+
+        if let Some((id, delta)) = self.state.ui.request_document_page.take() {
+            self.turn_document_page(id, delta);
         }
 
         if let Some(req) = self.state.ui.request_slipsheet_dialog.take() {

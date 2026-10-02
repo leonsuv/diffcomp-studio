@@ -114,6 +114,11 @@ fn en(key: &str) -> &'static str {
         "workspace.align_hint" => "Automatically align drawings",
         "workspace.auto_hint" => "Update differences after document or setting changes",
         "workspace.page" => "Page",
+        "workspace.page_short" => "p.",
+        "workspace.pages_together" => "Turn together",
+        "workspace.pages_together_hint" => "Turns every document by one page. Use the arrows in the document list to turn a single document.",
+        "workspace.prev_doc_page" => "Previous page of this document",
+        "workspace.next_doc_page" => "Next page of this document",
         "workspace.pages" => "pages",
         "workspace.prev_page" => "Previous page (Page Up)",
         "workspace.next_page" => "Next page (Page Down)",
@@ -518,6 +523,11 @@ fn de(key: &str) -> Option<&'static str> {
             "Unterschiede nach Dokument- oder Einstellungsänderungen neu berechnen"
         }
         "workspace.page" => "Seite",
+        "workspace.page_short" => "S.",
+        "workspace.pages_together" => "Gemeinsam blättern",
+        "workspace.pages_together_hint" => "Blättert alle Dokumente um eine Seite. Einzelne Dokumente mit den Pfeilen in der Dokumentliste blättern.",
+        "workspace.prev_doc_page" => "Vorherige Seite dieses Dokuments",
+        "workspace.next_doc_page" => "Nächste Seite dieses Dokuments",
         "workspace.pages" => "Seiten",
         "workspace.prev_page" => "Vorherige Seite (Bild ↑)",
         "workspace.next_page" => "Nächste Seite (Bild ↓)",

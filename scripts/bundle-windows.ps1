@@ -5,7 +5,8 @@ Push-Location $ProjectRoot
 try {
     # Bundle the C runtime into the executable, avoiding a separate VC++ redistributable.
     $PreviousRustFlags = $env:RUSTFLAGS
-    $env:RUSTFLAGS = (($PreviousRustFlags + " -C target-feature=+crt-static").Trim())
+    # Keep local user and checkout paths out of the shipped executable.
+    $env:RUSTFLAGS = (($PreviousRustFlags + " -C target-feature=+crt-static --remap-path-prefix=$env:USERPROFILE=~ --remap-path-prefix=$ProjectRoot=.").Trim())
     cargo build --locked --release -p dc_app --bin diffcomp-studio
     if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
     $Version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value

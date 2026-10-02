@@ -334,7 +334,7 @@ impl SessionState {
             // Show the new document instead of a blank page.
             self.set_page(0);
         }
-        layer.show_page(self.current_page);
+        layer.show_session_page(self.current_page);
 
         info!(
             layer_id = %id,
@@ -454,18 +454,33 @@ impl SessionState {
 
     /// Number of pages of the longest document (at least 1).
     pub fn page_count(&self) -> usize {
-        self.layers.iter().map(Layer::page_count).max().unwrap_or(1)
+        self.layers
+            .iter()
+            .map(|l| (l.page_count() as i64 - l.page_shift as i64).max(1) as usize)
+            .max()
+            .unwrap_or(1)
     }
 
-    /// Show the same page of every document. Returns whether the page changed.
+    /// Whether all documents show the same page number.
+    pub fn pages_linked(&self) -> bool {
+        self.layers.iter().all(|l| l.page_shift == 0)
+    }
+
+    /// Turn all documents to a session page, keeping their page shifts.
+    /// Returns whether the page changed.
     pub fn set_page(&mut self, page: usize) -> bool {
         let page = page.min(self.page_count().saturating_sub(1));
-        if page == self.current_page && self.layers.iter().all(|l| l.active_page == page) {
+        if page == self.current_page
+            && self
+                .layers
+                .iter()
+                .all(|l| l.page_for(page).unwrap_or(l.page_count()) == l.active_page)
+        {
             return false;
         }
         self.current_page = page;
         for layer in &mut self.layers {
-            layer.show_page(page);
+            layer.show_session_page(page);
         }
         if self
             .selected_layer
@@ -483,9 +498,49 @@ impl SessionState {
     pub fn sync_pages(&mut self) {
         self.current_page = self.current_page.min(self.page_count() - 1);
         for layer in &mut self.layers {
-            layer.show_page(self.current_page);
+            layer.show_session_page(self.current_page);
         }
-        self.assign_revision_colors();
+    }
+
+    /// Turn the pages of one document only. Returns the previous shift if the
+    /// document has the requested page.
+    pub fn shift_document_page(&mut self, id: LayerId, delta: i32) -> Option<i32> {
+        let current_page = self.current_page;
+        let layer = self.get_layer(id)?;
+        let shown = current_page as i64 + layer.page_shift as i64 + delta as i64;
+        if shown < 0 || !layer.has_page(shown as usize) {
+            return None;
+        }
+        let old_shift = layer.page_shift;
+        self.set_page_shift(id, old_shift + delta);
+        Some(old_shift)
+    }
+
+    /// Set how many pages a document is ahead of the session page.
+    /// The changed page pairing needs a new alignment.
+    pub fn set_page_shift(&mut self, id: LayerId, shift: i32) {
+        let current_page = self.current_page;
+        let Some(layer) = self.get_layer_mut(id) else {
+            return;
+        };
+        layer.page_shift = shift;
+        layer.show_session_page(current_page);
+        let reference = layer.is_reference;
+        for layer in &mut self.layers {
+            if !layer.is_reference && (reference || layer.id == id) {
+                layer.aligned = None;
+                layer.homography_matrix = None;
+                layer.alignment_confidence = None;
+                for page in &mut layer.pages {
+                    page.aligned = None;
+                    page.homography_matrix = None;
+                    page.alignment_confidence = None;
+                }
+            }
+        }
+        self.selected_annotation = None;
+        self.diff_result = None;
+        self.is_dirty = true;
     }
 
     /// Give each revision a highlight color that differs from the reference
@@ -871,6 +926,9 @@ pub struct UIState {
     /// Needs re-alignment of all target layers.
     pub alignment_invalidated: bool,
 
+    /// Request to turn the page of one document: (document, +1 or -1)
+    pub request_document_page: Option<(LayerId, i32)>,
+
     /// Request to open a file dialog for slip-sheeting
     pub request_slipsheet_dialog: Option<SlipSheetRequest>,
 
@@ -955,6 +1013,7 @@ impl UIState {
             diff_invalidated: false,
             fit_view_requested: false,
             alignment_invalidated: false,
+            request_document_page: None,
             request_slipsheet_dialog: None,
             export_flattened_requested: false,
             export_diff_requested: false,
@@ -1193,6 +1252,48 @@ mod tests {
         // Pages beyond the longest document are clamped.
         session.set_page(7);
         assert_eq!(session.current_page, 1);
+    }
+
+    #[test]
+    fn documents_can_be_paired_on_different_pages() {
+        let page = |shade: u8| {
+            RasterBuffer::new(RgbaImage::from_pixel(4, 4, image::Rgba([shade; 4])), 300)
+        };
+        let mut session = SessionState::new();
+        let reference = session
+            .add_document(
+                "ref".into(),
+                PathBuf::from("/ref.tif"),
+                vec![page(1), page(2)],
+            )
+            .unwrap();
+        let revision = session
+            .add_document(
+                "rev".into(),
+                PathBuf::from("/rev.tif"),
+                vec![page(3), page(4), page(5)],
+            )
+            .unwrap();
+        // Page 1 of the reference against page 2 of the revision.
+        assert_eq!(session.shift_document_page(revision, 1), Some(0));
+        assert!(!session.pages_linked());
+        let shown =
+            |s: &SessionState, id| s.get_layer(id).unwrap().original.image.get_pixel(0, 0)[0];
+        assert_eq!(
+            (shown(&session, reference), shown(&session, revision)),
+            (1, 4)
+        );
+        // Turning together keeps the pairing.
+        assert!(session.set_page(1));
+        assert_eq!(
+            (shown(&session, reference), shown(&session, revision)),
+            (2, 5)
+        );
+        // The revision has no page 4.
+        assert_eq!(session.shift_document_page(revision, 1), None);
+        assert_eq!(session.page_count(), 2);
+        assert_eq!(session.shift_document_page(revision, -2), Some(1));
+        assert_eq!(shown(&session, revision), 3);
     }
 
     #[test]
