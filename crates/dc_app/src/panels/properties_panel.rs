@@ -171,36 +171,23 @@ fn document_inspector(ui: &mut Ui, state: &mut AppState) {
             );
         }
     });
-    if !reference {
-        let position_id = ui.id().with("position_adjustment");
-        let mut expanded = ui.data_mut(|d| d.get_temp::<bool>(position_id).unwrap_or(false));
-        if ui
-            .selectable_label(expanded, crate::i18n::tr("inspector.adjust_position"))
-            .clicked()
-        {
-            expanded = !expanded;
-        }
-        ui.data_mut(|d| d.insert_temp(position_id, expanded));
-        if expanded {
-            ui.add_space(8.0);
-            section(ui, crate::i18n::tr("inspector.position"), |ui| {
-                field(ui, crate::i18n::tr("inspector.horizontal"), |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut layer.offset_x)
-                            .speed(1.0)
-                            .suffix(" px"),
-                    );
-                });
-                field(ui, crate::i18n::tr("inspector.vertical"), |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut layer.offset_y)
-                            .speed(1.0)
-                            .suffix(" px"),
-                    );
-                });
-            });
-        }
-    }
+    ui.add_space(8.0);
+    section(ui, crate::i18n::tr("inspector.position"), |ui| {
+        field(ui, crate::i18n::tr("inspector.horizontal"), |ui| {
+            ui.add(
+                egui::DragValue::new(&mut layer.offset_x)
+                    .speed(1.0)
+                    .suffix(" px"),
+            );
+        });
+        field(ui, crate::i18n::tr("inspector.vertical"), |ui| {
+            ui.add(
+                egui::DragValue::new(&mut layer.offset_y)
+                    .speed(1.0)
+                    .suffix(" px"),
+            );
+        });
+    });
     let after = (
         layer.name.clone(),
         layer.opacity,

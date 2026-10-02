@@ -30,12 +30,12 @@ impl Language {
 
 impl Default for Language {
     fn default() -> Self {
-        Language::English
+        Language::German
     }
 }
 
 /// Global language setting (atomic for lock-free access from any thread).
-static CURRENT_LANGUAGE: AtomicU8 = AtomicU8::new(0);
+static CURRENT_LANGUAGE: AtomicU8 = AtomicU8::new(Language::German as u8);
 
 pub fn set_language(lang: Language) {
     CURRENT_LANGUAGE.store(lang as u8, Ordering::Relaxed);

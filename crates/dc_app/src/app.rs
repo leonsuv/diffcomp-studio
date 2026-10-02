@@ -168,6 +168,8 @@ impl DiffCompApp {
         gpu_engine: Option<GpuDiffEngine>,
         startup_session: Option<PathBuf>,
     ) -> Self {
+        crate::i18n::set_language(crate::i18n::Language::German);
+
         // Configure egui style
         configure_style(&cc.egui_ctx);
 
@@ -518,6 +520,7 @@ impl DiffCompApp {
 
         let mut state = AppState::new_with_gpu_arc(gpu_engine);
         state.session = session;
+        state.ui.fit_view_requested = true;
         let workspace = ProjectWorkspace {
             id,
             name,
@@ -1780,6 +1783,7 @@ impl DiffCompApp {
         match crate::persistence::load_session(path) {
             Ok(session) => {
                 self.state.session = session;
+                self.state.ui.fit_view_requested = true;
                 self.state.ui.diff_invalidated = true;
                 self.textures.clear();
                 self.state
@@ -3466,6 +3470,49 @@ mod regression_tests {
             image::RgbaImage::from_pixel(4, 4, image::Rgba([255; 4])),
             300,
         )
+    }
+    #[test]
+    fn loaded_templates_fit_when_the_canvas_is_ready() {
+        let mut app = app();
+        let mut session = crate::state::SessionState::new();
+        session
+            .add_layer("Template".into(), "missing-template.png".into(), image())
+            .unwrap();
+        session.viewport.zoom = 0.0;
+        let path = std::env::temp_dir().join(format!(
+            "diffcomp-fit-{}-{}.dcs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        crate::persistence::save_session(&session, &path).unwrap();
+        app.load_session_from_path(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(app.state.ui.fit_view_requested);
+
+        let ctx = egui::Context::default();
+        for size in [egui::vec2(40.0, 40.0), egui::vec2(800.0, 600.0)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        crate::panels::render_view(ui, &mut app.state, &mut app.textures);
+                    });
+                },
+            );
+            assert_eq!(app.state.ui.fit_view_requested, size.x < 64.0);
+        }
+        assert!(app.state.session.viewport.zoom > 0.0);
+        assert_eq!(app.state.session.viewport.center_x, 2.0);
+        assert_eq!(app.state.session.viewport.center_y, 2.0);
+
+        app.create_project_tab_from_session("Imported template".into(), session);
+        assert!(app.state.ui.fit_view_requested);
     }
     #[test]
     fn inactive_project_receives_its_result_without_disturbing_active_project() {

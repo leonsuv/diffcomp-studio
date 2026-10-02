@@ -19,7 +19,11 @@ pub fn render_view(ui: &mut Ui, state: &mut AppState, textures: &mut TextureCach
     let available_rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(available_rect, Sense::click_and_drag());
 
-    if state.ui.fit_view_requested {
+    // Wait for a usable canvas so startup layout cannot consume Fit at zero size.
+    if state.ui.fit_view_requested
+        && available_rect.width() > 64.0
+        && available_rect.height() > 64.0
+    {
         if let Some(layer) = state
             .session
             .visible_reference()
