@@ -150,6 +150,23 @@ impl DocumentLoader for PdfLoader {
         Ok(buffer)
     }
 
+    fn load_all_pages(&self, path: &Path, config: &LoadConfig) -> CoreResult<Vec<RasterBuffer>> {
+        let bytes = std::fs::read(path).map_err(|e| CoreError::FileReadError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        render_all_pages(bytes, config.dpi)
+    }
+
+    fn load_all_pages_from_memory(
+        &self,
+        data: &[u8],
+        _name_hint: &str,
+        config: &LoadConfig,
+    ) -> CoreResult<Vec<RasterBuffer>> {
+        render_all_pages(data.to_vec(), config.dpi)
+    }
+
     fn get_metadata(&self, path: &Path) -> CoreResult<LoaderMetadata> {
         let bytes = std::fs::read(path).map_err(|e| CoreError::FileReadError {
             path: path.to_path_buf(),
@@ -196,23 +213,32 @@ pub fn load_pdf_all_pages(path: &Path, dpi: u32) -> CoreResult<Vec<(usize, Raste
         source: e,
     })?;
 
-    let data_vec = bytes;
-    let pdf = Pdf::new(Arc::new(data_vec)).map_err(|e| CoreError::ImageDecodeError {
+    Ok(render_all_pages(bytes, dpi)?
+        .into_iter()
+        .map(|buffer| (buffer.page_index.unwrap_or(0) + 1, buffer))
+        .collect())
+}
+
+fn render_all_pages(data: Vec<u8>, dpi: u32) -> CoreResult<Vec<RasterBuffer>> {
+    let pdf = Pdf::new(Arc::new(data)).map_err(|e| CoreError::ImageDecodeError {
         reason: format!("Failed to parse PDF: {:?}", e),
     })?;
 
     let pages = pdf.pages();
     let page_count = pages.len();
     info!(page_count = page_count, dpi = dpi, "Loading all PDF pages");
+    if page_count == 0 {
+        return Err(CoreError::ImageDecodeError {
+            reason: "PDF has no pages".into(),
+        });
+    }
 
     let mut results = Vec::with_capacity(page_count);
-
     for (idx, page) in pages.iter().enumerate() {
         let rgba = PdfLoader::render_page(page, dpi)?;
         let mut buffer = RasterBuffer::new(rgba, dpi);
         buffer.page_index = Some(idx);
-        results.push((idx + 1, buffer));
+        results.push(buffer);
     }
-
     Ok(results)
 }

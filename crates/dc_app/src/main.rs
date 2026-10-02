@@ -31,7 +31,7 @@ fn main() -> eframe::Result<()> {
         "Starting DiffComp Studio"
     );
 
-    let startup_session = parse_startup_session_arg();
+    let (startup_session, startup_documents) = parse_startup_args();
 
     // Configure the native window
     let mut viewport = egui::ViewportBuilder::default()
@@ -57,24 +57,39 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             let gpu = dc_gpu::GpuDiffEngine::new_blocking().ok();
-            Ok(Box::new(DiffCompApp::new_with_startup_session(
+            Ok(Box::new(DiffCompApp::new_with_startup(
                 cc,
                 gpu,
                 startup_session.clone(),
+                startup_documents.clone(),
             )))
         }),
     )
 }
 
+/// `--session file.dcs` or `file.dcs` opens a session; other paths are
+/// documents to compare, the first one being the reference.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_startup_session_arg() -> Option<PathBuf> {
+fn parse_startup_args() -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut session = None;
+    let mut documents = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--session" {
-            return args.next().map(PathBuf::from);
+            session = args.next().map(PathBuf::from);
+        } else if !arg.starts_with("--") {
+            let path = PathBuf::from(arg);
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("dcs"))
+            {
+                session = Some(path);
+            } else {
+                documents.push(path);
+            }
         }
     }
-    None
+    (session, documents)
 }
 
 #[cfg(target_arch = "wasm32")]

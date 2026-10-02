@@ -139,26 +139,36 @@ pub fn layer_panel(ui: &mut Ui, state: &mut AppState, textures: &mut TextureCach
                                             egui::vec2(5.0, 5.0),
                                             egui::Sense::hover(),
                                         );
+                                        let color = state.session.highlight_color(layer);
                                         ui.painter().circle_filled(
                                             r.center(),
                                             2.5,
-                                            Color32::from_rgb(
-                                                layer.blend_color.r,
-                                                layer.blend_color.g,
-                                                layer.blend_color.b,
-                                            ),
+                                            Color32::from_rgb(color.r, color.g, color.b),
                                         );
+                                        let role = crate::i18n::tr(if layer.is_reference {
+                                            "workspace.reference"
+                                        } else {
+                                            "workspace.revision"
+                                        });
+                                        let detail = if layer.is_page_missing() {
+                                            format!(
+                                                "{role} · {}",
+                                                crate::i18n::tr("workspace.page_missing")
+                                            )
+                                        } else if layer.page_count() > 1 {
+                                            format!(
+                                                "{role} · {} {}",
+                                                layer.page_count(),
+                                                crate::i18n::tr("workspace.pages")
+                                            )
+                                        } else {
+                                            role.to_string()
+                                        };
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(crate::i18n::tr(
-                                                    if layer.is_reference {
-                                                        "workspace.reference"
-                                                    } else {
-                                                        "workspace.revision"
-                                                    },
-                                                ))
-                                                .small()
-                                                .color(crate::theme::MUTED),
+                                                RichText::new(detail)
+                                                    .small()
+                                                    .color(crate::theme::MUTED),
                                             )
                                             .truncate(),
                                         );

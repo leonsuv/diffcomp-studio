@@ -5,15 +5,19 @@
 // =============================================================================
 
 use crate::state::SessionState;
-use crate::undo::{LayerSaveData as UndoLayerSaveData, UndoStackSave};
+use crate::undo::{
+    saved_page, LayerSaveData as UndoLayerSaveData, PageSaveData as UndoPageSaveData, UndoStackSave,
+};
 use base64::Engine;
 use dc_core::{
-    Annotation, CoreError, CoreResult, Layer, LayerColor, LayerId, RasterBuffer, Viewport,
+    Annotation, CoreError, CoreResult, Layer, LayerColor, LayerId, LayerPage, RasterBuffer,
+    Viewport,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{error, info};
 
 /// Data structure for saving a session to disk.
@@ -44,6 +48,9 @@ struct SessionSaveData {
     /// Maps annotation IDs to workflow state IDs
     #[serde(default)]
     annotation_statuses: std::collections::HashMap<String, String>,
+    /// Page shown for all documents
+    #[serde(default)]
+    current_page: usize,
 }
 
 fn default_count() -> u32 {
@@ -81,6 +88,73 @@ struct LayerSaveData {
     embedded_png: Option<String>,
     #[serde(default)]
     aligned_png: Option<String>,
+    /// Every page of a multi-page document. The top-level fields above repeat
+    /// the shown page so older versions still open the session.
+    #[serde(default)]
+    pages: Vec<PageData>,
+    #[serde(default)]
+    active_page: usize,
+}
+
+/// Saved state of one document page.
+#[derive(Serialize, Deserialize)]
+struct PageData {
+    #[serde(flatten)]
+    page: UndoPageSaveData,
+    #[serde(default)]
+    embedded_png: Option<String>,
+    #[serde(default)]
+    aligned_png: Option<String>,
+}
+
+fn encode_png(buffer: &RasterBuffer) -> CoreResult<String> {
+    let mut png = std::io::Cursor::new(Vec::new());
+    buffer
+        .image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| CoreError::InternalError {
+            message: e.to_string(),
+        })?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png.into_inner()))
+}
+
+fn decode_png(encoded: &str, dpi: u32) -> CoreResult<RasterBuffer> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| CoreError::InternalError {
+            message: e.to_string(),
+        })?;
+    let decoded = image::load_from_memory(&bytes).map_err(|e| CoreError::ImageDecodeError {
+        reason: e.to_string(),
+    })?;
+    Ok(RasterBuffer::from_dynamic(decoded, dpi))
+}
+
+/// Rebuild a page and its alignment from saved metadata.
+fn restore_page(
+    original: RasterBuffer,
+    data: &UndoPageSaveData,
+    aligned_png: Option<&str>,
+) -> CoreResult<LayerPage> {
+    let mut page = LayerPage::new(original);
+    page.homography_matrix = data.homography_matrix;
+    page.annotations = data.annotations.clone();
+    page.offset_x = data.offset_x;
+    page.offset_y = data.offset_y;
+    if let Some(encoded) = aligned_png {
+        page.aligned = Some(Arc::new(decode_png(encoded, page.original.dpi)?));
+    } else if let (Some(matrix), Some(size)) = (data.homography_matrix, data.aligned_size) {
+        page.aligned = Some(Arc::new(dc_core::HomographySolver::new().warp_image(
+            &page.original,
+            &dc_core::HomographyMatrix { elements: matrix },
+            size,
+        )?));
+    } else if let Some(size) = data.aligned_size {
+        let mut padded = image::RgbaImage::from_pixel(size.0, size.1, image::Rgba([255; 4]));
+        image::imageops::replace(&mut padded, &page.original.image, 0, 0);
+        page.aligned = Some(Arc::new(RasterBuffer::new(padded, page.original.dpi)));
+    }
+    Ok(page)
 }
 
 /// Save the current session to a file.
@@ -92,28 +166,29 @@ pub fn save_session(session: &SessionState, path: &Path) -> CoreResult<()> {
             .map(|layer| {
                 let mut data = LayerSaveData::from(layer);
                 // Files imported from memory must survive reopening the session.
-                if !layer.source_path.is_file() {
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    layer
-                        .original
-                        .image
-                        .write_to(&mut png, image::ImageFormat::Png)
-                        .map_err(|e| CoreError::InternalError {
-                            message: e.to_string(),
-                        })?;
-                    data.embedded_png =
-                        Some(base64::engine::general_purpose::STANDARD.encode(png.into_inner()));
+                let embed = !layer.source_path.is_file();
+                let shown = saved_page(layer);
+                if embed {
+                    data.embedded_png = Some(encode_png(&shown.original)?);
                 }
-                if let Some(aligned) = &layer.aligned {
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    aligned
-                        .image
-                        .write_to(&mut png, image::ImageFormat::Png)
-                        .map_err(|e| CoreError::InternalError {
-                            message: e.to_string(),
-                        })?;
-                    data.aligned_png =
-                        Some(base64::engine::general_purpose::STANDARD.encode(png.into_inner()));
+                if let Some(aligned) = &shown.aligned {
+                    data.aligned_png = Some(encode_png(aligned)?);
+                }
+                if layer.page_count() > 1 {
+                    data.pages = (0..layer.page_count())
+                        .map(|index| {
+                            let page = layer.page(index);
+                            Ok(PageData {
+                                page: UndoPageSaveData::from(&page),
+                                embedded_png: if embed {
+                                    Some(encode_png(&page.original)?)
+                                } else {
+                                    None
+                                },
+                                aligned_png: page.aligned.as_deref().map(encode_png).transpose()?,
+                            })
+                        })
+                        .collect::<CoreResult<_>>()?;
                 }
                 Ok(data)
             })
@@ -129,6 +204,7 @@ pub fn save_session(session: &SessionState, path: &Path) -> CoreResult<()> {
         custom_columns: session.custom_columns.clone(),
         workflow_states: session.workflow_states.clone(),
         annotation_statuses: session.annotation_statuses.clone(),
+        current_page: session.current_page,
     };
 
     // Serialize into a sibling file, flush it, then replace the destination atomically.
@@ -200,21 +276,61 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
                 .unwrap_or(Path::new("."))
                 .join(&layer_data.source_path)
         };
-        let image = if let Some(encoded) = &layer_data.embedded_png {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|e| CoreError::InternalError {
-                    message: e.to_string(),
-                })?;
-            let decoded =
-                image::load_from_memory(&bytes).map_err(|e| CoreError::ImageDecodeError {
-                    reason: e.to_string(),
-                })?;
-            let mut buffer = RasterBuffer::from_dynamic(decoded, layer_data.dpi);
-            buffer.page_index = layer_data.page_index;
-            buffer
+        let pages = if layer_data.pages.is_empty() {
+            let image = if let Some(encoded) = &layer_data.embedded_png {
+                let mut buffer = decode_png(encoded, layer_data.dpi)?;
+                buffer.page_index = layer_data.page_index;
+                buffer
+            } else {
+                load_image(&source_path, layer_data.dpi, layer_data.page_index)?
+            };
+            let data = UndoPageSaveData {
+                homography_matrix: layer_data.homography_matrix,
+                annotations: layer_data.annotations.clone(),
+                offset_x: layer_data.offset_x,
+                offset_y: layer_data.offset_y,
+                aligned_size: layer_data.aligned_size,
+            };
+            vec![restore_page(
+                image,
+                &data,
+                layer_data.aligned_png.as_deref(),
+            )?]
         } else {
-            load_image(&source_path, layer_data.dpi, layer_data.page_index)?
+            let mut from_disk: Vec<Option<RasterBuffer>> =
+                if layer_data.pages.iter().any(|p| p.embedded_png.is_none()) {
+                    load_all_pages(&source_path, layer_data.dpi)?
+                        .into_iter()
+                        .map(Some)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            layer_data
+                .pages
+                .iter()
+                .enumerate()
+                .map(|(index, page)| {
+                    let original =
+                        match &page.embedded_png {
+                            Some(encoded) => {
+                                let mut buffer = decode_png(encoded, layer_data.dpi)?;
+                                buffer.page_index = Some(index);
+                                buffer
+                            }
+                            None => from_disk.get_mut(index).and_then(Option::take).ok_or_else(
+                                || CoreError::ImageDecodeError {
+                                    reason: format!(
+                                        "{} has no page {}",
+                                        source_path.display(),
+                                        index + 1
+                                    ),
+                                },
+                            )?,
+                        };
+                    restore_page(original, &page.page, page.aligned_png.as_deref())
+                })
+                .collect::<CoreResult<Vec<_>>>()?
         };
 
         // Reconstruct layer
@@ -222,50 +338,18 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
             layer_data.id,
             layer_data.name,
             source_path,
-            image,
+            RasterBuffer::new(image::RgbaImage::new(1, 1), layer_data.dpi),
             layer_data.is_reference,
         );
-
-        layer.homography_matrix = layer_data.homography_matrix;
+        let active_page = if pages.len() > 1 {
+            layer_data.active_page
+        } else {
+            0
+        };
+        layer.set_pages(pages, active_page);
         layer.visible = layer_data.visible;
         layer.opacity = layer_data.opacity;
         layer.blend_color = layer_data.blend_color;
-        layer.annotations = layer_data.annotations;
-
-        layer.offset_x = layer_data.offset_x;
-        layer.offset_y = layer_data.offset_y;
-        if let Some(encoded) = &layer_data.aligned_png {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|e| CoreError::InternalError {
-                    message: e.to_string(),
-                })?;
-            let decoded =
-                image::load_from_memory(&bytes).map_err(|e| CoreError::ImageDecodeError {
-                    reason: e.to_string(),
-                })?;
-            layer.aligned = Some(std::sync::Arc::new(RasterBuffer::from_dynamic(
-                decoded,
-                layer.original.dpi,
-            )));
-        } else if let (Some(matrix), Some(size)) =
-            (layer.homography_matrix, layer_data.aligned_size)
-        {
-            layer.aligned = Some(std::sync::Arc::new(
-                dc_core::HomographySolver::new().warp_image(
-                    &layer.original,
-                    &dc_core::HomographyMatrix { elements: matrix },
-                    size,
-                )?,
-            ));
-        } else if let Some(size) = layer_data.aligned_size {
-            let mut padded = image::RgbaImage::from_pixel(size.0, size.1, image::Rgba([255; 4]));
-            image::imageops::replace(&mut padded, &layer.original.image, 0, 0);
-            layer.aligned = Some(std::sync::Arc::new(RasterBuffer::new(
-                padded,
-                layer.original.dpi,
-            )));
-        }
 
         session.layers.push(layer);
     }
@@ -286,43 +370,51 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
     session.workflow_states = save_data.workflow_states;
     session.annotation_statuses = save_data.annotation_statuses;
     session.session_path = Some(path.to_path_buf());
+    session.current_page = save_data.current_page;
+    session.sync_pages();
 
     // Restore undo stack if present
     if let Some(undo_save) = save_data.undo_stack {
         let load_layer_fn = |data: &UndoLayerSaveData| -> Option<Layer> {
-            let image = match load_image(&data.source_path, data.dpi, data.page_index) {
-                Ok(img) => img,
+            let restore = || -> CoreResult<Layer> {
+                let mut layer = Layer::new(
+                    data.id,
+                    data.name.clone(),
+                    data.source_path.clone(),
+                    RasterBuffer::new(image::RgbaImage::new(1, 1), data.dpi),
+                    data.is_reference,
+                );
+                if data.pages.is_empty() {
+                    let image = load_image(&data.source_path, data.dpi, data.page_index)?;
+                    let page = UndoPageSaveData {
+                        homography_matrix: data.homography_matrix,
+                        annotations: data.annotations.clone(),
+                        offset_x: data.offset_x,
+                        offset_y: data.offset_y,
+                        aligned_size: data.aligned_size,
+                    };
+                    layer.set_pages(vec![restore_page(image, &page, None)?], 0);
+                } else {
+                    let pages = load_all_pages(&data.source_path, data.dpi)?
+                        .into_iter()
+                        .zip(&data.pages)
+                        .map(|(image, page)| restore_page(image, page, None))
+                        .collect::<CoreResult<Vec<_>>>()?;
+                    layer.set_pages(pages, data.active_page);
+                }
+                layer.visible = data.visible;
+                layer.opacity = data.opacity;
+                layer.blend_color = data.blend_color;
+                Ok(layer)
+            };
+            match restore() {
+                Ok(layer) => Some(layer),
                 Err(e) => {
                     error!("Failed to reload image for undo layer {}: {}", data.name, e);
                     // Skip this command if the image can't be loaded
-                    return None;
+                    None
                 }
-            };
-            let mut layer = Layer::new(
-                data.id,
-                data.name.clone(),
-                data.source_path.clone(),
-                image,
-                data.is_reference,
-            );
-            layer.homography_matrix = data.homography_matrix;
-            layer.visible = data.visible;
-            layer.opacity = data.opacity;
-            layer.blend_color = data.blend_color;
-            layer.annotations = data.annotations.clone();
-            layer.offset_x = data.offset_x;
-            layer.offset_y = data.offset_y;
-            if let (Some(matrix), Some(size)) = (data.homography_matrix, data.aligned_size) {
-                layer.aligned = dc_core::HomographySolver::new()
-                    .warp_image(
-                        &layer.original,
-                        &dc_core::HomographyMatrix { elements: matrix },
-                        size,
-                    )
-                    .ok()
-                    .map(std::sync::Arc::new);
             }
-            Some(layer)
         };
         session.undo_stack = crate::undo::UndoStack::from_save(undo_save, &load_layer_fn);
     }
@@ -334,6 +426,7 @@ pub fn load_session(path: &Path) -> CoreResult<SessionState> {
 // Helper to convert Layer to LayerSaveData
 impl From<&Layer> for LayerSaveData {
     fn from(layer: &Layer) -> Self {
+        let page = saved_page(layer);
         Self {
             id: layer.id,
             name: layer.name.clone(),
@@ -341,25 +434,32 @@ impl From<&Layer> for LayerSaveData {
                 .source_path
                 .canonicalize()
                 .unwrap_or_else(|_| layer.source_path.clone()),
-            homography_matrix: layer.homography_matrix,
+            homography_matrix: page.homography_matrix,
             visible: layer.visible,
             opacity: layer.opacity,
             blend_color: layer.blend_color,
             is_reference: layer.is_reference,
-            annotations: layer.annotations.clone(),
-            offset_x: layer.offset_x,
-            offset_y: layer.offset_y,
-            dpi: layer.original.dpi,
-            page_index: layer.original.page_index,
-            aligned_size: layer.aligned.as_ref().map(|b| b.dimensions()),
+            annotations: page.annotations.clone(),
+            offset_x: page.offset_x,
+            offset_y: page.offset_y,
+            dpi: page.original.dpi,
+            page_index: page.original.page_index,
+            aligned_size: page.aligned.as_ref().map(|b| b.dimensions()),
             embedded_png: None,
             aligned_png: None,
+            pages: Vec::new(),
+            active_page: layer.active_page,
         }
     }
 }
 
 fn default_dpi() -> u32 {
     dc_core::DEFAULT_RENDER_DPI
+}
+
+fn load_all_pages(path: &Path, dpi: u32) -> CoreResult<Vec<RasterBuffer>> {
+    dc_core::LoaderRegistry::with_defaults()
+        .load_all_pages(path, &dc_core::LoadConfig::default().with_dpi(dpi))
 }
 
 fn load_image(path: &Path, dpi: u32, page_index: Option<usize>) -> CoreResult<RasterBuffer> {
@@ -431,6 +531,47 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn roundtrip_multi_page_tiff_keeps_page_state() {
+        use tiff::encoder::{colortype, TiffEncoder};
+        let dir = temp_dir();
+        let tiff_path = dir.join("sheets.tif");
+        {
+            let file = std::fs::File::create(&tiff_path).unwrap();
+            let mut encoder = TiffEncoder::new(file).unwrap();
+            encoder
+                .write_image::<colortype::Gray8>(2, 2, &[0, 255, 255, 255])
+                .unwrap();
+            encoder
+                .write_image::<colortype::Gray8>(3, 2, &[255, 0, 255, 255, 255, 255])
+                .unwrap();
+        }
+        let pages = dc_core::LoaderRegistry::with_defaults()
+            .load_all_pages(&tiff_path, &dc_core::LoadConfig::default())
+            .unwrap();
+        let mut session = SessionState::new();
+        let id = session
+            .add_document("sheets".into(), tiff_path.clone(), pages)
+            .unwrap();
+        session.get_layer_mut(id).unwrap().offset_x = 4.0;
+        session.set_page(1);
+        session.get_layer_mut(id).unwrap().offset_y = 9.0;
+        let path = dir.join("session.dcs");
+        save_session(&session, &path).unwrap();
+
+        let mut loaded = load_session(&path).unwrap();
+        assert_eq!(loaded.current_page, 1);
+        let layer = loaded.get_layer(id).unwrap();
+        assert_eq!(layer.page_count(), 2);
+        assert_eq!(layer.original.dimensions(), (3, 2));
+        assert_eq!(layer.offset_y, 9.0);
+        loaded.set_page(0);
+        let layer = loaded.get_layer(id).unwrap();
+        assert_eq!(layer.original.dimensions(), (2, 2));
+        assert_eq!(layer.offset_x, 4.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn missing_source_is_reported_instead_of_silently_replaced() {
         let dir = temp_dir();

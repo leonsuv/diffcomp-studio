@@ -242,6 +242,53 @@ pub struct Layer {
     pub offset_x: f32,
     /// Manual offset Y (pixels)
     pub offset_y: f32,
+
+    /// All pages of the document. The page-specific fields above always hold
+    /// `active_page`; its entry here is outdated until another page is shown.
+    pub pages: Vec<LayerPage>,
+
+    /// Page shown in the page-specific fields. May exceed the page count when
+    /// the session shows a page this document does not have (blank).
+    pub active_page: usize,
+}
+
+/// Page-specific state of a document layer.
+#[derive(Debug, Clone)]
+pub struct LayerPage {
+    /// Page image as loaded
+    pub original: std::sync::Arc<RasterBuffer>,
+    /// Page aligned to the reference page
+    pub aligned: Option<std::sync::Arc<RasterBuffer>>,
+    /// Alignment homography for this page
+    pub homography_matrix: Option<[[f64; 3]; 3]>,
+    /// Alignment confidence for this page
+    pub alignment_confidence: Option<f64>,
+    /// Markups drawn on this page
+    pub annotations: Vec<Annotation>,
+    /// Manual offset X (pixels)
+    pub offset_x: f32,
+    /// Manual offset Y (pixels)
+    pub offset_y: f32,
+}
+
+impl LayerPage {
+    /// Unaligned page without markups.
+    pub fn new(original: RasterBuffer) -> Self {
+        Self {
+            original: std::sync::Arc::new(original),
+            aligned: None,
+            homography_matrix: None,
+            alignment_confidence: None,
+            annotations: Vec::new(),
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
+
+    /// Transparent stand-in for a page the document does not have.
+    fn blank(dpi: u32) -> Self {
+        Self::new(RasterBuffer::new(RgbaImage::new(1, 1), dpi))
+    }
 }
 
 impl Layer {
@@ -268,7 +315,118 @@ impl Layer {
             annotations: Vec::new(),
             offset_x: 0.0,
             offset_y: 0.0,
+            pages: Vec::new(),
+            active_page: 0,
         }
+    }
+
+    /// Create a document layer from its pages; page 0 is shown first.
+    pub fn with_pages(
+        id: LayerId,
+        name: String,
+        source_path: PathBuf,
+        pages: Vec<RasterBuffer>,
+        is_reference: bool,
+    ) -> Self {
+        let mut pages = pages.into_iter();
+        let first = pages
+            .next()
+            .unwrap_or_else(|| RasterBuffer::new(RgbaImage::new(1, 1), crate::DEFAULT_RENDER_DPI));
+        let mut layer = Self::new(id, name, source_path, first, is_reference);
+        let rest: Vec<LayerPage> = pages.map(LayerPage::new).collect();
+        if !rest.is_empty() {
+            layer.pages = std::iter::once(layer.page(0)).chain(rest).collect();
+        }
+        layer
+    }
+
+    /// Number of pages in the document.
+    pub fn page_count(&self) -> usize {
+        self.pages.len().max(1)
+    }
+
+    /// Whether the document has the given page (0-indexed).
+    pub fn has_page(&self, page: usize) -> bool {
+        page < self.page_count()
+    }
+
+    /// Whether the shown page is a blank stand-in for a missing page.
+    pub fn is_page_missing(&self) -> bool {
+        !self.has_page(self.active_page)
+    }
+
+    /// Current state of a page, including the active one.
+    pub fn page(&self, page: usize) -> LayerPage {
+        if page == self.active_page || self.pages.is_empty() {
+            LayerPage {
+                original: self.original.clone(),
+                aligned: self.aligned.clone(),
+                homography_matrix: self.homography_matrix,
+                alignment_confidence: self.alignment_confidence,
+                annotations: self.annotations.clone(),
+                offset_x: self.offset_x,
+                offset_y: self.offset_y,
+            }
+        } else {
+            self.pages[page].clone()
+        }
+    }
+
+    /// Show another page, keeping the state of the current one.
+    /// A page the document does not have is shown as a blank stand-in.
+    pub fn show_page(&mut self, page: usize) {
+        if page == self.active_page {
+            return;
+        }
+        if self.pages.is_empty() {
+            // Single-page documents keep their page in a slot while blank.
+            self.pages.push(self.page(0));
+        }
+        let previous = self.active_page;
+        let mut current = if self.has_page(page) {
+            std::mem::replace(&mut self.pages[page], LayerPage::blank(self.original.dpi))
+        } else {
+            LayerPage::blank(self.original.dpi)
+        };
+        self.swap_page_fields(&mut current);
+        if self.has_page(previous) {
+            self.pages[previous] = current;
+        }
+        self.active_page = page;
+        if self.pages.len() == 1 && self.active_page == 0 {
+            self.pages.clear();
+        }
+    }
+
+    /// Replace all pages and show `page` (blank if the document is shorter).
+    pub fn set_pages(&mut self, pages: Vec<LayerPage>, page: usize) {
+        if pages.is_empty() {
+            return;
+        }
+        let mut shown = pages
+            .get(page)
+            .cloned()
+            .unwrap_or_else(|| LayerPage::blank(pages[0].original.dpi));
+        self.swap_page_fields(&mut shown);
+        self.active_page = page;
+        self.pages = if pages.len() == 1 && page == 0 {
+            Vec::new()
+        } else {
+            pages
+        };
+    }
+
+    fn swap_page_fields(&mut self, page: &mut LayerPage) {
+        std::mem::swap(&mut self.original, &mut page.original);
+        std::mem::swap(&mut self.aligned, &mut page.aligned);
+        std::mem::swap(&mut self.homography_matrix, &mut page.homography_matrix);
+        std::mem::swap(
+            &mut self.alignment_confidence,
+            &mut page.alignment_confidence,
+        );
+        std::mem::swap(&mut self.annotations, &mut page.annotations);
+        std::mem::swap(&mut self.offset_x, &mut page.offset_x);
+        std::mem::swap(&mut self.offset_y, &mut page.offset_y);
     }
 
     /// Cheap immutable snapshot for background processing and undo history.
@@ -534,6 +692,51 @@ mod tests {
 
         assert!((ix - ix2).abs() < 1e-10);
         assert!((iy - iy2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_layer_pages_keep_their_state() {
+        let page = |shade: u8| {
+            RasterBuffer::new(
+                RgbaImage::from_pixel(2, 2, image::Rgba([shade, 0, 0, 255])),
+                300,
+            )
+        };
+        let mut layer = Layer::with_pages(
+            LayerId::new(0),
+            "sheet".into(),
+            PathBuf::from("sheet.tif"),
+            vec![page(10), page(20)],
+            true,
+        );
+        assert_eq!(layer.page_count(), 2);
+        layer.offset_x = 5.0;
+        layer.show_page(1);
+        assert_eq!(layer.original.image.get_pixel(0, 0)[0], 20);
+        assert_eq!(layer.offset_x, 0.0);
+        layer.offset_x = 7.0;
+        layer.show_page(2);
+        assert!(layer.is_page_missing());
+        assert_eq!(layer.original.dimensions(), (1, 1));
+        layer.show_page(0);
+        assert_eq!(layer.original.image.get_pixel(0, 0)[0], 10);
+        assert_eq!(layer.offset_x, 5.0);
+        assert_eq!(layer.page(1).offset_x, 7.0);
+
+        let mut single = Layer::new(
+            LayerId::new(1),
+            "single".into(),
+            PathBuf::from("single.png"),
+            page(30),
+            false,
+        );
+        single.offset_y = 3.0;
+        single.show_page(1);
+        assert!(single.is_page_missing());
+        single.show_page(0);
+        assert_eq!(single.original.image.get_pixel(0, 0)[0], 30);
+        assert_eq!(single.offset_y, 3.0);
+        assert!(single.pages.is_empty());
     }
 
     #[test]

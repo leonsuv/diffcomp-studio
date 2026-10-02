@@ -160,6 +160,40 @@ impl LoaderRegistry {
         loader.load(path, config)
     }
 
+    /// Load every page of a document (multi-page TIFF and PDF), in page order.
+    pub fn load_all_pages(
+        &self,
+        path: impl AsRef<Path>,
+        config: &LoadConfig,
+    ) -> CoreResult<Vec<RasterBuffer>> {
+        let path = path.as_ref();
+        let loader = self
+            .find_loader(path)
+            .ok_or_else(|| CoreError::UnsupportedFormat {
+                extension: path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })?;
+        loader.load_all_pages(path, config)
+    }
+
+    /// Load every page of an in-memory document, in page order.
+    pub fn load_all_pages_from_memory(
+        &self,
+        data: &[u8],
+        name_hint: &str,
+        config: &LoadConfig,
+    ) -> CoreResult<Vec<RasterBuffer>> {
+        let loader =
+            self.find_loader(Path::new(name_hint))
+                .ok_or_else(|| CoreError::UnsupportedFormat {
+                    extension: "unknown".into(),
+                })?;
+        loader.load_all_pages_from_memory(data, name_hint, config)
+    }
+
     /// Load a document from memory buffer.
     #[instrument(skip(self, data, config), fields(name = %name_hint))]
     pub fn load_from_memory(

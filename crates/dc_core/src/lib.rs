@@ -80,8 +80,8 @@ pub use loaders::{
 };
 pub use tools::{Tool, ToolStyle, ToolType};
 pub use types::{
-    CoreError, CoreResult, Keypoint, KeypointMatch, Layer, LayerColor, LayerId, RasterBuffer,
-    Viewport,
+    CoreError, CoreResult, Keypoint, KeypointMatch, Layer, LayerColor, LayerId, LayerPage,
+    RasterBuffer, Viewport,
 };
 
 /// Maximum number of layers allowed in a comparison session.

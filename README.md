@@ -18,9 +18,10 @@ Document comparison for technical drawings, PDFs and images — built in Rust.
 
 ## A workspace designed around the document
 
-A large canvas, a persistent tool rail and a contextual inspector keep the comparison easy to read. Reference content stays neutral; removed and added details use distinct colors. Choose your own colors for each revision.
+A large canvas, a persistent tool rail and a contextual inspector keep the comparison easy to read. Reference content stays neutral; removed and added details use distinct colors. Colors follow the role: the reference keeps its color when you choose another reference, and every revision gets a different one. Choose your own colors for each revision.
 
 - **Compare PDF and raster documents:** PDF, PNG, JPEG, TIFF and BMP.
+- **Page through multi-page drawings:** multi-page TIFF and PDF sheets stay one document. Page up/down shows the same sheet of every revision; each page keeps its own alignment, offset and markups.
 - **Review multiple revisions:** compare visible layers against a reference, preserving document coordinates and offsets.
 - **Choose the right view:** color difference, overlay, heatmap, binary mask, subtraction or XOR.
 - **Align drawings:** automatic alignment plus optional manual position adjustment.
@@ -48,10 +49,17 @@ Windows packages are built on a Windows runner. The workflow runs the workspace 
 2. The first document becomes the reference. Use a layer's menu to change it.
 3. Click **Align** when the pages need alignment, then choose a comparison view.
 4. Click **Compare**, or leave **Auto** enabled to update changes automatically.
-5. Use **Fit**, pan and zoom to review details. Select a markup tool to annotate the document.
-6. Save the project as a `.dcs` session.
+5. Use **Fit**, pan and zoom to review details. For multi-page documents, use ◀ ▶ in the toolbar or Page Up/Page Down.
+6. Select a markup tool to annotate the document.
+7. Save the project as a `.dcs` session.
 
-**Useful shortcuts:** `Ctrl/Cmd+O` opens documents, `H` selects the hand tool, `V` selects objects, `Z` selects zoom and `F` fits the document. Hold Alt while using the zoom tool to zoom out.
+Documents can also be opened from the command line; the first one becomes the reference:
+
+```powershell
+DiffComp-Studio.exe old.tif new.tif
+```
+
+**Useful shortcuts:** `Ctrl/Cmd+O` opens documents, `Page Up`/`Page Down` turn pages, `H` selects the hand tool, `V` selects objects, `Z` selects zoom and `F` fits the document. Hold Alt while using the zoom tool to zoom out.
 
 Structural color comparison can ignore shifts up to one pixel. It runs on the CPU; explicit graphics-processor mode uses pixel comparison. Background work on desktop keeps imports, alignment and comparison processing away from the interface thread.
 

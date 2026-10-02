@@ -239,14 +239,11 @@ pub fn tool_rail(ctx: &egui::Context, state: &mut AppState) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
             for (icon, label, mode) in [
-                (Icon::Select, "Selection (V)", ToolMode::Select),
-                (Icon::Hand, "Hand / Pan (H)", ToolMode::Pan),
-                (
-                    Icon::Zoom,
-                    "Zoom (Z) · Alt-click to zoom out",
-                    ToolMode::Zoom,
-                ),
+                (Icon::Select, "rail.select", ToolMode::Select),
+                (Icon::Hand, "rail.pan", ToolMode::Pan),
+                (Icon::Zoom, "rail.zoom", ToolMode::Zoom),
             ] {
+                let label = crate::i18n::tr(label);
                 if icon_button(ui, icon, label, state.ui.tool_mode == mode).clicked() {
                     state.ui.tool_mode = mode;
                     state.tools.active_tool = None;
@@ -256,14 +253,15 @@ pub fn tool_rail(ctx: &egui::Context, state: &mut AppState) {
             ui.separator();
             ui.add_space(5.0);
             for (icon, label, tool) in [
-                (Icon::Pen, "Pen", ToolType::Pen),
-                (Icon::Line, "Line", ToolType::Line),
-                (Icon::Arrow, "Arrow", ToolType::Arrow),
-                (Icon::Rectangle, "Rectangle", ToolType::Rectangle),
-                (Icon::Ellipse, "Ellipse", ToolType::Ellipse),
-                (Icon::Text, "Text", ToolType::Text),
-                (Icon::Cloud, "Revision cloud", ToolType::Cloud),
+                (Icon::Pen, "rail.pen", ToolType::Pen),
+                (Icon::Line, "rail.line", ToolType::Line),
+                (Icon::Arrow, "rail.arrow", ToolType::Arrow),
+                (Icon::Rectangle, "rail.rectangle", ToolType::Rectangle),
+                (Icon::Ellipse, "rail.ellipse", ToolType::Ellipse),
+                (Icon::Text, "rail.text", ToolType::Text),
+                (Icon::Cloud, "rail.cloud", ToolType::Cloud),
             ] {
+                let label = crate::i18n::tr(label);
                 let selected = state.ui.tool_mode == ToolMode::Drawing
                     && state
                         .tools
@@ -280,9 +278,10 @@ pub fn tool_rail(ctx: &egui::Context, state: &mut AppState) {
             ui.separator();
             ui.add_space(5.0);
             for (icon, label, tool) in [
-                (Icon::Ruler, "Measure length", ToolType::MeasureLength),
-                (Icon::Count, "Count", ToolType::Count),
+                (Icon::Ruler, "rail.measure", ToolType::MeasureLength),
+                (Icon::Count, "rail.count", ToolType::Count),
             ] {
+                let label = crate::i18n::tr(label);
                 let selected = state.ui.tool_mode == ToolMode::Drawing
                     && state
                         .tools
@@ -297,15 +296,15 @@ pub fn tool_rail(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(5.0);
             let menu = ui.menu_button("…", |ui| {
-                for tool in [
-                    ToolType::Highlighter,
-                    ToolType::Callout,
-                    ToolType::MeasureArea,
-                    ToolType::MeasurePolylength,
-                    ToolType::Viewport,
-                    ToolType::DimensionChain,
+                for (tool, label) in [
+                    (ToolType::Highlighter, "rail.highlighter"),
+                    (ToolType::Callout, "rail.callout"),
+                    (ToolType::MeasureArea, "rail.area"),
+                    (ToolType::MeasurePolylength, "rail.polylength"),
+                    (ToolType::Viewport, "rail.viewport"),
+                    (ToolType::DimensionChain, "rail.dim_chain"),
                 ] {
-                    if ui.button(tool.to_string()).clicked() {
+                    if ui.button(crate::i18n::tr(label)).clicked() {
                         state.session.selected_annotation = None;
                         state.tools.active_tool = Some(Tool::new_default(tool));
                         state.ui.tool_mode = ToolMode::Drawing;

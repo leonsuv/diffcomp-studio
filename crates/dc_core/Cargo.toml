@@ -23,6 +23,7 @@ bincode.workspace = true
 
 # Image processing (pure Rust, no system deps)
 image.workspace = true
+tiff = "0.10"              # Multi-page TIFF drawings
 
 # PDF loading (pure Rust)
 hayro = "0.5"               # Pure Rust PDF rasterizer

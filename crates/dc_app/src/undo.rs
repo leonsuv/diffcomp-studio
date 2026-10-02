@@ -19,7 +19,7 @@
 // - Annotation selection changes are NOT tracked — they are ephemeral UI.
 // =============================================================================
 
-use dc_core::{Annotation, DiffConfig, Layer, LayerColor, LayerId};
+use dc_core::{Annotation, DiffConfig, Layer, LayerColor, LayerId, LayerPage};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of undo steps retained.
@@ -107,6 +107,10 @@ pub enum UndoCommand {
         new_reference_id: LayerId,
     },
 
+    /// Another page was shown. Recorded so that undoing page-specific
+    /// changes (markups, offsets) always happens on their own page.
+    SetPage { old_page: usize, new_page: usize },
+
     // =========================================================================
     // Annotation Operations
     // =========================================================================
@@ -187,6 +191,7 @@ impl UndoCommand {
             Self::SetLayerBlendColor { .. } => "Change Layer Color".to_string(),
             Self::SetLayerOffset { .. } => "Change Layer Offset".to_string(),
             Self::SetReference { .. } => "Set Reference Layer".to_string(),
+            Self::SetPage { new_page, .. } => format!("Show Page {}", new_page + 1),
             Self::AddAnnotation { .. } => "Add Annotation".to_string(),
             Self::RemoveAnnotation { .. } => "Delete Annotation".to_string(),
             Self::ModifyAnnotation { .. } => "Modify Annotation".to_string(),
@@ -382,6 +387,63 @@ pub struct LayerSaveData {
     /// Aligned output canvas.
     #[serde(default)]
     pub aligned_size: Option<(u32, u32)>,
+    /// All pages of a multi-page document; empty for single pages.
+    #[serde(default)]
+    pub pages: Vec<PageSaveData>,
+    /// Page shown when the snapshot was taken.
+    #[serde(default)]
+    pub active_page: usize,
+}
+
+/// Page-specific layer state without pixel data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PageSaveData {
+    /// Homography matrix for alignment.
+    #[serde(default)]
+    pub homography_matrix: Option<[[f64; 3]; 3]>,
+    /// Markups on this page.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    /// Offset X.
+    #[serde(default)]
+    pub offset_x: f32,
+    /// Offset Y.
+    #[serde(default)]
+    pub offset_y: f32,
+    /// Aligned output canvas.
+    #[serde(default)]
+    pub aligned_size: Option<(u32, u32)>,
+}
+
+impl From<&LayerPage> for PageSaveData {
+    fn from(page: &LayerPage) -> Self {
+        Self {
+            homography_matrix: page.homography_matrix,
+            annotations: page.annotations.clone(),
+            offset_x: page.offset_x,
+            offset_y: page.offset_y,
+            aligned_size: page.aligned.as_ref().map(|b| b.dimensions()),
+        }
+    }
+}
+
+/// The page whose state is stored in a layer's top-level save fields.
+pub fn saved_page(layer: &Layer) -> LayerPage {
+    layer.page(if layer.is_page_missing() {
+        0
+    } else {
+        layer.active_page
+    })
+}
+
+/// Save data for every page of a multi-page document.
+pub fn save_pages(layer: &Layer) -> Vec<PageSaveData> {
+    if layer.page_count() < 2 {
+        return Vec::new();
+    }
+    (0..layer.page_count())
+        .map(|page| PageSaveData::from(&layer.page(page)))
+        .collect()
 }
 
 fn default_layer_dpi() -> u32 {
@@ -390,21 +452,24 @@ fn default_layer_dpi() -> u32 {
 
 impl From<&Layer> for LayerSaveData {
     fn from(layer: &Layer) -> Self {
+        let page = saved_page(layer);
         Self {
             id: layer.id,
             name: layer.name.clone(),
             source_path: layer.source_path.clone(),
-            homography_matrix: layer.homography_matrix,
+            homography_matrix: page.homography_matrix,
             visible: layer.visible,
             opacity: layer.opacity,
             blend_color: layer.blend_color,
             is_reference: layer.is_reference,
-            annotations: layer.annotations.clone(),
-            offset_x: layer.offset_x,
-            offset_y: layer.offset_y,
-            dpi: layer.original.dpi,
-            page_index: layer.original.page_index,
-            aligned_size: layer.aligned.as_ref().map(|b| b.dimensions()),
+            annotations: page.annotations.clone(),
+            offset_x: page.offset_x,
+            offset_y: page.offset_y,
+            dpi: page.original.dpi,
+            page_index: page.original.page_index,
+            aligned_size: page.aligned.as_ref().map(|b| b.dimensions()),
+            pages: save_pages(layer),
+            active_page: layer.active_page,
         }
     }
 }
@@ -498,6 +563,13 @@ pub enum UndoCommandSave {
         old_reference_id: Option<LayerId>,
         /// New reference.
         new_reference_id: LayerId,
+    },
+    /// Page changed.
+    SetPage {
+        /// Old page.
+        old_page: usize,
+        /// New page.
+        new_page: usize,
     },
     /// Annotation added.
     AddAnnotation {
@@ -646,6 +718,10 @@ impl UndoCommand {
             } => UndoCommandSave::SetReference {
                 old_reference_id: *old_reference_id,
                 new_reference_id: *new_reference_id,
+            },
+            Self::SetPage { old_page, new_page } => UndoCommandSave::SetPage {
+                old_page: *old_page,
+                new_page: *new_page,
             },
             Self::AddAnnotation {
                 layer_id,
@@ -803,6 +879,9 @@ impl UndoCommandSave {
                 old_reference_id,
                 new_reference_id,
             }),
+            Self::SetPage { old_page, new_page } => {
+                Some(UndoCommand::SetPage { old_page, new_page })
+            }
             Self::AddAnnotation {
                 layer_id,
                 annotation,
@@ -1106,6 +1185,14 @@ impl UndoCommand {
                 Self::SetReference {
                     old_reference_id: Some(*new_reference_id),
                     new_reference_id: old_reference_id.unwrap_or(*new_reference_id),
+                }
+            }
+
+            Self::SetPage { old_page, new_page } => {
+                session.set_page(*old_page);
+                Self::SetPage {
+                    old_page: *new_page,
+                    new_page: *old_page,
                 }
             }
 

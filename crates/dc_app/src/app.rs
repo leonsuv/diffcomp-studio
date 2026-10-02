@@ -25,7 +25,9 @@ enum AppMessage {
     DocumentsLoaded {
         project_id: u32,
         path: PathBuf,
-        result: dc_core::CoreResult<Vec<(String, dc_core::RasterBuffer)>>,
+        name: String,
+        /// All pages of the document
+        result: dc_core::CoreResult<Vec<dc_core::RasterBuffer>>,
     },
     AlignmentComputed {
         project_id: u32,
@@ -168,6 +170,17 @@ impl DiffCompApp {
         gpu_engine: Option<GpuDiffEngine>,
         startup_session: Option<PathBuf>,
     ) -> Self {
+        Self::new_with_startup(cc, gpu_engine, startup_session, Vec::new())
+    }
+
+    /// Start with a saved session or documents from the command line
+    /// (the first document becomes the reference).
+    pub fn new_with_startup(
+        cc: &eframe::CreationContext<'_>,
+        gpu_engine: Option<GpuDiffEngine>,
+        startup_session: Option<PathBuf>,
+        startup_documents: Vec<PathBuf>,
+    ) -> Self {
         crate::i18n::set_language(crate::i18n::Language::German);
 
         // Configure egui style
@@ -217,6 +230,13 @@ impl DiffCompApp {
 
         if let Some(path) = startup_session {
             app.load_session_from_path(&path);
+        }
+        if !startup_documents.is_empty() {
+            // Background decoders need the context to wake the interface.
+            app.egui_ctx = Some(cc.egui_ctx.clone());
+            for path in startup_documents {
+                app.load_file(path);
+            }
         }
 
         app
@@ -1011,6 +1031,16 @@ impl DiffCompApp {
             }
         }
 
+        // Page Up / Page Down: previous / next page of all documents
+        if input.key_pressed(Key::PageUp) {
+            let page = self.state.session.current_page.saturating_sub(1);
+            self.show_page(page);
+        }
+        if input.key_pressed(Key::PageDown) {
+            let page = self.state.session.current_page + 1;
+            self.show_page(page);
+        }
+
         // Space: Toggle pan mode
         if input.key_pressed(Key::Space) {
             self.state.ui.tool_mode = ToolMode::Pan;
@@ -1124,6 +1154,8 @@ impl DiffCompApp {
             self.state.ui.diff_invalidated = true;
             // Invalidate texture cache for any changed layers
             self.textures.clear();
+            self.state.session.sync_pages();
+            self.align_targets(true);
         } else {
             self.state
                 .ui
@@ -1142,6 +1174,8 @@ impl DiffCompApp {
             self.state.ui.diff_invalidated = true;
             // Invalidate texture cache for any changed layers
             self.textures.clear();
+            self.state.session.sync_pages();
+            self.align_targets(true);
         } else {
             self.state
                 .ui
@@ -1156,6 +1190,7 @@ impl DiffCompApp {
                 AppMessage::DocumentsLoaded {
                     project_id,
                     path,
+                    name,
                     result,
                 } => {
                     let previous = self.current_project_id;
@@ -1168,35 +1203,31 @@ impl DiffCompApp {
                     self.state.ui.pending_operations =
                         self.state.ui.pending_operations.saturating_sub(1);
                     match result {
-                        Ok(documents) => {
-                            for (name, buffer) in documents {
-                                match self.state.session.add_layer(name, path.clone(), buffer) {
-                                    Ok(id) => {
-                                        let index = self
-                                            .state
-                                            .session
-                                            .layers
-                                            .iter()
-                                            .position(|l| l.id == id)
-                                            .unwrap_or(0);
-                                        let layer =
-                                            self.state.session.get_layer(id).unwrap().clone();
-                                        self.state.session.undo_stack.push(UndoCommand::AddLayer {
-                                            layer_id: id,
-                                            index,
-                                            layer: Box::new(layer),
-                                        });
-                                        if self.state.session.layers.len() == 1 {
-                                            self.state.ui.fit_view_requested = true;
-                                        }
-                                        self.align_layer(id);
+                        Ok(pages) => {
+                            match self.state.session.add_document(name, path.clone(), pages) {
+                                Ok(id) => {
+                                    let index = self
+                                        .state
+                                        .session
+                                        .layers
+                                        .iter()
+                                        .position(|l| l.id == id)
+                                        .unwrap_or(0);
+                                    let layer = self.state.session.get_layer(id).unwrap().clone();
+                                    self.state.session.undo_stack.push(UndoCommand::AddLayer {
+                                        layer_id: id,
+                                        index,
+                                        layer: Box::new(layer),
+                                    });
+                                    if self.state.session.layers.len() == 1 {
+                                        self.state.ui.fit_view_requested = true;
                                     }
-                                    Err(e) => {
-                                        self.state
-                                            .ui
-                                            .set_status(format!("Failed to add document: {e}"));
-                                        break;
-                                    }
+                                    self.align_layer(id);
+                                }
+                                Err(e) => {
+                                    self.state
+                                        .ui
+                                        .set_status(format!("Failed to add document: {e}"));
                                 }
                             }
                             self.state.ui.diff_invalidated = true;
@@ -1254,11 +1285,11 @@ impl DiffCompApp {
                     match self
                         .state
                         .loader_registry
-                        .load_from_memory(&data, &name, &config)
+                        .load_all_pages_from_memory(&data, &name, &config)
                     {
-                        Ok(buffer) => {
+                        Ok(pages) => {
                             let path = PathBuf::from(&name);
-                            match self.state.session.add_layer(name.clone(), path, buffer) {
+                            match self.state.session.add_document(name.clone(), path, pages) {
                                 Ok(id) => {
                                     self.state.ui.set_status(format!("Loaded {}", name));
                                     // Record undo for add layer
@@ -1546,34 +1577,11 @@ impl DiffCompApp {
                 .and_then(|n| n.to_str())
                 .unwrap_or("Document")
                 .to_string();
-            let result = if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-            {
-                dc_core::load_pdf_all_pages(&path, dc_core::DEFAULT_PDF_DPI).map(|pages| {
-                    let multiple = pages.len() > 1;
-                    pages
-                        .into_iter()
-                        .map(|(page, buffer)| {
-                            (
-                                if multiple {
-                                    format!("{name} - Page {page}")
-                                } else {
-                                    name.clone()
-                                },
-                                buffer,
-                            )
-                        })
-                        .collect()
-                })
-            } else {
-                registry
-                    .load(&path, &LoadConfig::default())
-                    .map(|buffer| vec![(name, buffer)])
-            };
+            let result = registry.load_all_pages(&path, &LoadConfig::default());
             let _ = tx.send(AppMessage::DocumentsLoaded {
                 project_id,
                 path,
+                name,
                 result,
             });
             if let Some(ctx) = ctx {
@@ -1596,27 +1604,12 @@ impl DiffCompApp {
             .set_status(crate::i18n::tr("status.slipsheet"));
         info!("Slip-sheeting started: req={:?}", req);
 
-        let dpi = dc_core::DEFAULT_PDF_DPI;
-        let is_pdf = new_path
-            .extension()
-            .map(|e| e.to_ascii_lowercase() == "pdf")
-            .unwrap_or(false);
-
         // Load new buffers
-        let mut new_pages = Vec::new();
-        if is_pdf {
-            if let Ok(pages) = dc_core::load_pdf_all_pages(&new_path, dpi) {
-                new_pages = pages.into_iter().map(|(_, b)| b).collect();
-            }
-        } else {
-            if let Ok(b) = self
-                .state
-                .loader_registry
-                .load(&new_path, &LoadConfig::default())
-            {
-                new_pages.push(b);
-            }
-        }
+        let new_pages = self
+            .state
+            .loader_registry
+            .load_all_pages(&new_path, &LoadConfig::default())
+            .unwrap_or_default();
 
         if new_pages.is_empty() {
             self.state
@@ -1638,15 +1631,11 @@ impl DiffCompApp {
             .ui
             .set_status(crate::i18n::tr("status.slipsheet"));
 
-        let config = LoadConfig::default();
-        let mut new_pages = Vec::new();
-        if let Ok(b) = self
+        let new_pages = self
             .state
             .loader_registry
-            .load_from_memory(&data, name, &config)
-        {
-            new_pages.push(b);
-        }
+            .load_all_pages_from_memory(&data, name, &LoadConfig::default())
+            .unwrap_or_default();
 
         if new_pages.is_empty() {
             self.state
@@ -1656,6 +1645,44 @@ impl DiffCompApp {
         }
 
         self.execute_slipsheet_replacement(new_pages, PathBuf::from(name), req);
+    }
+
+    /// Move markups of an old page onto its replacement.
+    fn transfer_annotations(
+        &self,
+        old_page: &dc_core::LayerPage,
+        new_buffer: &dc_core::RasterBuffer,
+    ) -> Vec<dc_core::Annotation> {
+        let mut annotations = old_page.annotations.clone();
+        if annotations.is_empty() {
+            return annotations;
+        }
+        // Old page is Reference, new page is Target
+        match self
+            .state
+            .alignment_engine
+            .align(&old_page.original, new_buffer)
+        {
+            // res.homography maps Target -> Reference; markups need Reference -> Target.
+            Ok(res) => match res.homography.inverse() {
+                Ok(inv_h) => {
+                    for annot in &mut annotations {
+                        annot.transform_by(&inv_h);
+                    }
+                    info!(
+                        "Transformed {} annotations during slipsheet",
+                        annotations.len()
+                    );
+                }
+                Err(_) => tracing::warn!(
+                    "Homography inversion failed during slipsheet, annotations remain at original coords"
+                ),
+            },
+            Err(_) => tracing::warn!(
+                "Alignment failed during slipsheet, annotations remain at original coords"
+            ),
+        }
+        annotations
     }
 
     fn execute_slipsheet_replacement(
@@ -1680,77 +1707,55 @@ impl DiffCompApp {
         };
 
         let mut replaced_count = 0;
+        let current_page = self.state.session.current_page;
 
-        for (i, target_layer_id) in to_replace.into_iter().enumerate() {
-            let next_buffer = new_pages.get(i).or_else(|| new_pages.last()); // Fallback to last page if fewer new pages than old
-            if let Some(new_buffer) = next_buffer {
-                // We need to fetch the existing layer
-                let old_layer = if let Some(l) = self.state.session.get_layer(target_layer_id) {
-                    l.clone()
-                } else {
-                    continue;
-                };
-
-                // Create a temporary unaligned new layer so we can align it AGAINST the old layer
-                // Old layer is Reference, New layer is Target
-                let engine = &self.state.alignment_engine;
-                let alignment_result = engine.align(&old_layer.original, new_buffer);
-
-                let mut final_annotations = old_layer.annotations.clone();
-
-                if let Ok(res) = alignment_result {
-                    // Try to map annotations. res.homography maps Target -> Reference
-                    // But we want to map annotations from Reference (Old) to Target (New).
-                    // So we need reverse homography: Reference -> Target.
-                    if let Ok(inv_h) = res.homography.inverse() {
-                        for annot in &mut final_annotations {
-                            annot.transform_by(&inv_h);
-                        }
-                        info!(
-                            "Transformed {} annotations during slipsheet",
-                            final_annotations.len()
-                        );
-                    } else {
-                        tracing::warn!("Homography inversion failed during slipsheet, annotations remain at original coords");
+        for target_layer_id in to_replace {
+            // We need to fetch the existing layer
+            let Some(old_layer) = self.state.session.get_layer(target_layer_id).cloned() else {
+                continue;
+            };
+            // Page p of the new document replaces page p; markups follow their page.
+            let pages = new_pages
+                .iter()
+                .enumerate()
+                .map(|(page, new_buffer)| {
+                    let mut replacement = dc_core::LayerPage::new(new_buffer.clone());
+                    if old_layer.has_page(page) {
+                        let old_page = old_layer.page(page);
+                        replacement.annotations = self.transfer_annotations(&old_page, new_buffer);
                     }
-                } else {
-                    tracing::warn!(
-                        "Alignment failed during slipsheet, annotations remain at original coords"
-                    );
-                }
+                    replacement
+                })
+                .collect();
 
-                // Update the layer with the new image and transformed annotations
-                if let Some(layer_mut) = self.state.session.get_layer_mut(target_layer_id) {
-                    // We invalidate its alignment against the global reference layer, since the image changed
-                    layer_mut.aligned = None;
-                    layer_mut.homography_matrix = None;
-                    layer_mut.alignment_confidence = None;
-
-                    layer_mut.original = std::sync::Arc::new(new_buffer.clone());
-                    layer_mut.source_path = new_path.clone();
-                    layer_mut.annotations = final_annotations;
-                    layer_mut.name = new_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                }
-
-                self.textures.remove(target_layer_id.0 as u64);
-
-                // Now we need to align the newly updated layer against the global reference (if it's not the reference itself)
-                let is_ref = self
-                    .state
-                    .session
-                    .get_layer(target_layer_id)
-                    .map(|l| l.is_reference)
-                    .unwrap_or(false);
-                if !is_ref {
-                    self.align_layer(target_layer_id);
-                }
-
-                replaced_count += 1;
+            // Update the layer with the new pages and transformed annotations
+            if let Some(layer_mut) = self.state.session.get_layer_mut(target_layer_id) {
+                // The new pages are not yet aligned against the reference.
+                layer_mut.set_pages(pages, current_page);
+                layer_mut.source_path = new_path.clone();
+                layer_mut.name = new_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
             }
+
+            self.textures.remove(target_layer_id.0 as u64);
+
+            // Now we need to align the newly updated layer against the global reference (if it's not the reference itself)
+            let is_ref = self
+                .state
+                .session
+                .get_layer(target_layer_id)
+                .map(|l| l.is_reference)
+                .unwrap_or(false);
+            if is_ref {
+                self.align_targets(false);
+            } else {
+                self.align_layer(target_layer_id);
+            }
+
+            replaced_count += 1;
         }
 
         self.state.ui.diff_invalidated = true;
@@ -1786,6 +1791,8 @@ impl DiffCompApp {
                 self.state.ui.fit_view_requested = true;
                 self.state.ui.diff_invalidated = true;
                 self.textures.clear();
+                // Pages saved before they were ever shown still need alignment.
+                self.align_targets(true);
                 self.state
                     .ui
                     .set_status(crate::i18n::tr("status.session_loaded"));
@@ -2002,6 +2009,7 @@ impl DiffCompApp {
             .session
             .target_layers()
             .iter()
+            .filter(|l| !l.is_page_missing())
             .map(|l| l.id)
             .collect();
 
@@ -2010,6 +2018,44 @@ impl DiffCompApp {
         }
 
         self.state.ui.is_loading = self.state.ui.pending_operations > 0;
+    }
+
+    /// Show another page of all documents and compare it.
+    fn show_page(&mut self, page: usize) {
+        let old_page = self.state.session.current_page;
+        if !self.state.session.set_page(page) {
+            return;
+        }
+        self.state.session.undo_stack.push(UndoCommand::SetPage {
+            old_page,
+            new_page: self.state.session.current_page,
+        });
+        self.textures.clear();
+        self.state.ui.diff_invalidated = true;
+        self.state.ui.diff_failed = false;
+        // Pages are aligned when they are first shown.
+        self.align_targets(true);
+        self.state.ui.set_status(format!(
+            "{} {} / {}",
+            crate::i18n::tr("workspace.page"),
+            self.state.session.current_page + 1,
+            self.state.session.page_count()
+        ));
+    }
+
+    /// Align the revisions shown on the current page.
+    fn align_targets(&mut self, only_unaligned: bool) {
+        let ids: Vec<_> = self
+            .state
+            .session
+            .target_layers()
+            .iter()
+            .filter(|l| !l.is_page_missing() && (!only_unaligned || l.aligned.is_none()))
+            .map(|l| l.id)
+            .collect();
+        for id in ids {
+            self.align_layer(id);
+        }
     }
 
     /// Align a single layer against the reference (called when a new layer is added).
@@ -2046,6 +2092,10 @@ impl DiffCompApp {
         let Some(layer) = self.state.session.get_layer(id) else {
             return;
         };
+        // A document without the current page has nothing to align.
+        if reference_layer.is_page_missing() || layer.is_page_missing() {
+            return;
+        }
         let reference_id = reference_layer.id;
         let reference = reference_layer.original.clone();
         let target = layer.original.clone();
@@ -2325,6 +2375,7 @@ impl DiffCompApp {
     /// Primary comparison actions stay visible, independent of the inspector tabs.
     fn workspace_toolbar(&mut self, ctx: &Context) {
         use dc_core::diff::BlendMode;
+        let mut go_to_page = None;
         egui::TopBottomPanel::top("workspace_controls")
             .frame(
                 egui::Frame::none()
@@ -2335,7 +2386,7 @@ impl DiffCompApp {
                 ui.horizontal(|ui| {
                     if ui
                         .button(crate::i18n::tr("workspace.open"))
-                        .on_hover_text("Open documents · Cmd/Ctrl+O")
+                        .on_hover_text(crate::i18n::tr("workspace.open_hint"))
                         .clicked()
                     {
                         self.state.ui.request_file_dialog = true;
@@ -2347,35 +2398,33 @@ impl DiffCompApp {
                             can_compare && self.state.ui.pending_operations == 0,
                             egui::Button::new(crate::i18n::tr("workspace.align")),
                         )
-                        .on_hover_text("Automatically align drawings")
+                        .on_hover_text(crate::i18n::tr("workspace.align_hint"))
                         .clicked()
                     {
                         self.perform_alignment();
                     }
                     let before = self.state.session.diff_config.blend_mode;
+                    let modes = [
+                        (BlendMode::ColorDifference, "blend.color_diff"),
+                        (BlendMode::Overlay, "blend.overlay"),
+                        (BlendMode::Heatmap, "blend.heatmap"),
+                        (BlendMode::BinaryMask, "blend.binary_mask"),
+                        (BlendMode::Subtract, "blend.subtract"),
+                        (BlendMode::Xor, "blend.xor"),
+                    ];
+                    let selected = modes
+                        .iter()
+                        .find(|(mode, _)| *mode == before)
+                        .map_or("", |(_, key)| crate::i18n::tr(key));
                     egui::ComboBox::from_id_salt("quick_comparison_mode")
                         .width(138.0)
-                        .selected_text(match before {
-                            BlendMode::ColorDifference => "Color difference",
-                            BlendMode::Overlay => "Overlay",
-                            BlendMode::Heatmap => "Heatmap",
-                            BlendMode::BinaryMask => "Binary mask",
-                            BlendMode::Subtract => "Subtract",
-                            BlendMode::Xor => "XOR",
-                        })
+                        .selected_text(selected)
                         .show_ui(ui, |ui| {
-                            for (mode, name) in [
-                                (BlendMode::ColorDifference, "Color difference"),
-                                (BlendMode::Overlay, "Overlay"),
-                                (BlendMode::Heatmap, "Heatmap"),
-                                (BlendMode::BinaryMask, "Binary mask"),
-                                (BlendMode::Subtract, "Subtract"),
-                                (BlendMode::Xor, "XOR"),
-                            ] {
+                            for (mode, key) in modes {
                                 ui.selectable_value(
                                     &mut self.state.session.diff_config.blend_mode,
                                     mode,
-                                    name,
+                                    crate::i18n::tr(key),
                                 );
                             }
                         });
@@ -2400,7 +2449,35 @@ impl DiffCompApp {
                         self.compute_diff();
                     }
                     ui.checkbox(&mut self.state.ui.auto_diff_enabled, "Auto")
-                        .on_hover_text("Update differences after document or setting changes");
+                        .on_hover_text(crate::i18n::tr("workspace.auto_hint"));
+                    let pages = self.state.session.page_count();
+                    if pages > 1 {
+                        let page = self.state.session.current_page;
+                        ui.separator();
+                        if ui
+                            .add_enabled(page > 0, egui::Button::new("◀"))
+                            .on_hover_text(crate::i18n::tr("workspace.prev_page"))
+                            .clicked()
+                        {
+                            go_to_page = Some(page - 1);
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} {} / {}",
+                                crate::i18n::tr("workspace.page"),
+                                page + 1,
+                                pages
+                            ))
+                            .strong(),
+                        );
+                        if ui
+                            .add_enabled(page + 1 < pages, egui::Button::new("▶"))
+                            .on_hover_text(crate::i18n::tr("workspace.next_page"))
+                            .clicked()
+                        {
+                            go_to_page = Some(page + 1);
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .button(crate::i18n::tr("workspace.fit"))
@@ -2441,6 +2518,9 @@ impl DiffCompApp {
                     });
                 });
             });
+        if let Some(page) = go_to_page {
+            self.show_page(page);
+        }
     }
 
     /// Check if auto-diff should be triggered and compute if needed.
@@ -3606,7 +3686,8 @@ mod regression_tests {
             .send(AppMessage::DocumentsLoaded {
                 project_id: 2,
                 path: "test.png".into(),
-                result: Ok(vec![("test".into(), image())]),
+                name: "test".into(),
+                result: Ok(vec![image()]),
             })
             .unwrap();
         app.check_messages();
@@ -3615,6 +3696,25 @@ mod regression_tests {
         assert_eq!(app.other_projects[0].state.session.layers.len(), 1);
         assert_eq!(app.other_projects[0].state.ui.pending_operations, 0);
         assert!(!app.other_projects[0].state.ui.is_loading);
+    }
+    #[test]
+    fn turning_pages_aligns_new_pages_and_can_be_undone() {
+        let mut app = app();
+        for name in ["old.tif", "new.tif"] {
+            app.state
+                .session
+                .add_document(name.into(), name.into(), vec![image(), image()])
+                .unwrap();
+        }
+        app.show_page(1);
+        assert_eq!(app.state.session.current_page, 1);
+        assert!(app.state.ui.diff_invalidated);
+        // The revision's second page is queued for alignment.
+        assert_eq!(app.state.ui.pending_operations, 1);
+        app.perform_undo();
+        assert_eq!(app.state.session.current_page, 0);
+        app.perform_redo();
+        assert_eq!(app.state.session.current_page, 1);
     }
     #[test]
     fn late_alignment_after_replacing_source_is_discarded() {

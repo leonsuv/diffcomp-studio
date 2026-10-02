@@ -125,6 +125,24 @@ pub trait DocumentLoader: Send + Sync {
         ))
     }
 
+    /// Load every page of the document, in page order.
+    ///
+    /// Single-page formats return one buffer. `config.page_index` is ignored.
+    fn load_all_pages(&self, path: &Path, config: &LoadConfig) -> CoreResult<Vec<RasterBuffer>> {
+        self.load(path, config).map(|buffer| vec![buffer])
+    }
+
+    /// Load every page of an in-memory document, in page order.
+    fn load_all_pages_from_memory(
+        &self,
+        data: &[u8],
+        name_hint: &str,
+        config: &LoadConfig,
+    ) -> CoreResult<Vec<RasterBuffer>> {
+        self.load_from_memory(data, name_hint, config)
+            .map(|buffer| vec![buffer])
+    }
+
     /// Get document metadata without fully loading.
     /// Useful for displaying file info before expensive rasterization.
     fn get_metadata(&self, path: &Path) -> CoreResult<LoaderMetadata>;

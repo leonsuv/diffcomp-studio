@@ -15,8 +15,8 @@
 // =============================================================================
 
 use dc_core::{
-    AlignmentConfig, AlignmentEngine, Annotation, DiffConfig, DiffEngine, Layer, LayerId,
-    LoaderRegistry, RasterBuffer, Tool, Viewport, MAX_LAYERS,
+    AlignmentConfig, AlignmentEngine, Annotation, DiffConfig, DiffEngine, Layer, LayerColor,
+    LayerId, LoaderRegistry, RasterBuffer, Tool, Viewport, MAX_LAYERS,
 };
 use dc_gpu::{GpuDiffEngine, GpuDiffParams};
 use dc_license::{LicenseStatus, LicenseVerifier};
@@ -179,6 +179,9 @@ pub struct SessionState {
     /// Currently selected layer (for operations)
     pub selected_layer: Option<LayerId>,
 
+    /// Page shown and compared for all documents (0-indexed)
+    pub current_page: usize,
+
     /// The synchronized viewport (pan/zoom state)
     pub viewport: Viewport,
 
@@ -283,6 +286,7 @@ impl SessionState {
             layers: Vec::new(),
             next_layer_id: 0,
             selected_layer: None,
+            current_page: 0,
             viewport: Viewport::default(),
             diff_config: DiffConfig::default(),
             alignment_config: AlignmentConfig::default(),
@@ -307,6 +311,16 @@ impl SessionState {
         source_path: PathBuf,
         image: RasterBuffer,
     ) -> Result<LayerId, String> {
+        self.add_document(name, source_path, vec![image])
+    }
+
+    /// Add a document with one or more pages as a single layer.
+    pub fn add_document(
+        &mut self,
+        name: String,
+        source_path: PathBuf,
+        pages: Vec<RasterBuffer>,
+    ) -> Result<LayerId, String> {
         if self.layers.len() >= MAX_LAYERS {
             return Err(format!("Maximum of {} layers allowed", MAX_LAYERS));
         }
@@ -315,7 +329,12 @@ impl SessionState {
         self.next_layer_id += 1;
 
         let is_reference = self.layers.is_empty();
-        let layer = Layer::new(id, name, source_path, image, is_reference);
+        let mut layer = Layer::with_pages(id, name, source_path, pages, is_reference);
+        if !layer.has_page(self.current_page) {
+            // Show the new document instead of a blank page.
+            self.set_page(0);
+        }
+        layer.show_page(self.current_page);
 
         info!(
             layer_id = %id,
@@ -324,6 +343,7 @@ impl SessionState {
         );
 
         self.layers.push(layer);
+        self.assign_revision_colors();
         self.selected_layer = Some(id);
         self.is_dirty = true;
         // Invalidate existing diff so auto-diff re-triggers with all visible layers
@@ -364,12 +384,21 @@ impl SessionState {
                     layer.aligned = None;
                     layer.homography_matrix = None;
                     layer.alignment_confidence = None;
+                    for page in &mut layer.pages {
+                        page.aligned = None;
+                        page.homography_matrix = None;
+                        page.alignment_confidence = None;
+                    }
                 }
             }
 
             // Update selection
             if self.selected_layer == Some(id) {
                 self.selected_layer = self.layers.first().map(|l| l.id);
+            }
+            self.assign_revision_colors();
+            if self.current_page >= self.page_count() {
+                self.set_page(self.page_count() - 1);
             }
 
             self.is_dirty = true;
@@ -400,22 +429,90 @@ impl SessionState {
         self.layers.iter().filter(|l| !l.is_reference).collect()
     }
 
-    /// Get visible layers for rendering.
+    /// Get visible layers for rendering (documents without the current page are skipped).
     pub fn visible_layers(&self) -> Vec<&Layer> {
-        self.layers.iter().filter(|l| l.visible).collect()
+        self.layers
+            .iter()
+            .filter(|l| l.visible && !l.is_page_missing())
+            .collect()
     }
 
     /// Get the visible reference layer (if any and visible).
     pub fn visible_reference(&self) -> Option<&Layer> {
-        self.layers.iter().find(|l| l.is_reference && l.visible)
+        self.layers
+            .iter()
+            .find(|l| l.is_reference && l.visible && !l.is_page_missing())
     }
 
     /// Get all visible non-reference (target) layers.
     pub fn visible_target_layers(&self) -> Vec<&Layer> {
         self.layers
             .iter()
-            .filter(|l| l.visible && !l.is_reference)
+            .filter(|l| l.visible && !l.is_reference && !l.is_page_missing())
             .collect()
+    }
+
+    /// Number of pages of the longest document (at least 1).
+    pub fn page_count(&self) -> usize {
+        self.layers.iter().map(Layer::page_count).max().unwrap_or(1)
+    }
+
+    /// Show the same page of every document. Returns whether the page changed.
+    pub fn set_page(&mut self, page: usize) -> bool {
+        let page = page.min(self.page_count().saturating_sub(1));
+        if page == self.current_page && self.layers.iter().all(|l| l.active_page == page) {
+            return false;
+        }
+        self.current_page = page;
+        for layer in &mut self.layers {
+            layer.show_page(page);
+        }
+        if self
+            .selected_layer
+            .and_then(|id| self.get_layer(id))
+            .is_some_and(Layer::is_page_missing)
+        {
+            self.selected_layer = self.reference_layer().map(|l| l.id);
+        }
+        self.selected_annotation = None;
+        self.diff_result = None;
+        true
+    }
+
+    /// Bring restored layers (undo, sessions) to the current page.
+    pub fn sync_pages(&mut self) {
+        self.current_page = self.current_page.min(self.page_count() - 1);
+        for layer in &mut self.layers {
+            layer.show_page(self.current_page);
+        }
+        self.assign_revision_colors();
+    }
+
+    /// Give each revision a highlight color that differs from the reference
+    /// color and from the other revisions. Colors follow the role, not the
+    /// order in which documents were opened.
+    pub fn assign_revision_colors(&mut self) {
+        let mut used = vec![self.diff_config.reference_color];
+        for layer in self.layers.iter_mut().filter(|l| !l.is_reference) {
+            if used.contains(&layer.blend_color) {
+                if let Some(color) = (1..10)
+                    .map(LayerColor::default_for_index)
+                    .find(|c| !used.contains(c))
+                {
+                    layer.blend_color = color;
+                }
+            }
+            used.push(layer.blend_color);
+        }
+    }
+
+    /// Highlight color a document uses in the color comparison.
+    pub fn highlight_color(&self, layer: &Layer) -> LayerColor {
+        if layer.is_reference {
+            self.diff_config.reference_color
+        } else {
+            layer.blend_color
+        }
     }
 
     /// Check if there are enough visible layers for comparison.
@@ -602,8 +699,14 @@ impl SessionState {
                 layer.aligned = None;
                 layer.homography_matrix = None;
                 layer.alignment_confidence = None;
+                for page in &mut layer.pages {
+                    page.aligned = None;
+                    page.homography_matrix = None;
+                    page.alignment_confidence = None;
+                }
             }
         }
+        self.assign_revision_colors();
 
         self.diff_result = None;
         self.is_dirty = true;
@@ -614,6 +717,7 @@ impl SessionState {
         self.layers.clear();
         self.next_layer_id = 0;
         self.selected_layer = None;
+        self.current_page = 0;
         self.viewport = Viewport::default();
         self.diff_result = None;
         self.is_dirty = false;
@@ -1000,6 +1104,95 @@ mod tests {
             )
             .unwrap();
         assert!(session.can_compare());
+    }
+
+    #[test]
+    fn revision_color_differs_from_reference_after_reference_change() {
+        let mut session = SessionState::new();
+        let first = session
+            .add_layer("old".into(), PathBuf::from("/a"), create_test_buffer())
+            .unwrap();
+        let second = session
+            .add_layer("new".into(), PathBuf::from("/b"), create_test_buffer())
+            .unwrap();
+        // Comparing the newer drawing against the older one used to make both red.
+        session.set_reference(second);
+        let reference = session.highlight_color(session.get_layer(second).unwrap());
+        let revision = session.highlight_color(session.get_layer(first).unwrap());
+        assert_eq!(reference, session.diff_config.reference_color);
+        assert_ne!(revision, reference);
+    }
+
+    #[test]
+    fn revision_colors_stay_distinct_when_ids_wrap() {
+        let mut session = SessionState::new();
+        session.next_layer_id = 9; // id 10 maps to the reference color again
+        for name in ["a", "b", "c"] {
+            session
+                .add_layer(name.into(), PathBuf::from(name), create_test_buffer())
+                .unwrap();
+        }
+        let colors: Vec<_> = session
+            .layers
+            .iter()
+            .map(|l| session.highlight_color(l))
+            .collect();
+        assert_ne!(colors[0], colors[1]);
+        assert_ne!(colors[0], colors[2]);
+        assert_ne!(colors[1], colors[2]);
+    }
+
+    #[test]
+    fn pages_switch_together_and_short_documents_drop_out() {
+        let page = |shade: u8| {
+            RasterBuffer::new(RgbaImage::from_pixel(4, 4, image::Rgba([shade; 4])), 300)
+        };
+        let mut session = SessionState::new();
+        session
+            .add_document(
+                "ref".into(),
+                PathBuf::from("/ref.tif"),
+                vec![page(1), page(2)],
+            )
+            .unwrap();
+        let revision = session
+            .add_document(
+                "rev".into(),
+                PathBuf::from("/rev.tif"),
+                vec![page(3), page(4)],
+            )
+            .unwrap();
+        let single = session
+            .add_document("single".into(), PathBuf::from("/single.png"), vec![page(5)])
+            .unwrap();
+        assert_eq!(session.page_count(), 2);
+        assert_eq!(session.visible_target_layers().len(), 2);
+
+        session.get_layer_mut(revision).unwrap().offset_x = 12.0;
+        assert!(session.set_page(1));
+        assert!(!session.set_page(1));
+        assert_eq!(
+            session
+                .reference_layer()
+                .unwrap()
+                .original
+                .image
+                .get_pixel(0, 0)[0],
+            2
+        );
+        let targets = session.visible_target_layers();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, revision);
+        assert_eq!(targets[0].offset_x, 0.0);
+        assert!(session.get_layer(single).unwrap().is_page_missing());
+        assert!(session.can_compare());
+
+        session.set_page(0);
+        assert_eq!(session.get_layer(revision).unwrap().offset_x, 12.0);
+        assert!(!session.get_layer(single).unwrap().is_page_missing());
+        // Pages beyond the longest document are clamped.
+        session.set_page(7);
+        assert_eq!(session.current_page, 1);
     }
 
     #[test]
