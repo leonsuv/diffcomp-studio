@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "dc_app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "dc_core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "dc_gpu"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "dc_keygen"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "dc_license"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "chrono",

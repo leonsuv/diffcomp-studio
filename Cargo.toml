@@ -78,7 +78,7 @@ cfg-if = "1.0"
 rfd = "0.15"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["DiffComp Studio Team"]
 license = "Proprietary"
